@@ -149,6 +149,7 @@ class FrameAnalysis:
     table_center: Optional[tuple[float, float]] = None
     btn_detection: Optional[Detection] = None
     table_amount_state: Dict[str, Any] = field(default_factory=dict)
+    amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_inference: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -183,6 +184,7 @@ class FrameAnalysis:
             "table_center": self.table_center,
             "btn_detection": self.btn_detection.to_dict() if self.btn_detection else None,
             "table_amount_state": dict(self.table_amount_state),
+            "amount_normalization": dict(self.amount_normalization),
             "action_inference": dict(self.action_inference),
         }
 
@@ -224,6 +226,7 @@ class HandState:
     conflict_state: Optional[str] = None
     table_center: Optional[tuple[float, float]] = None
     table_amount_state: Dict[str, Any] = field(default_factory=dict)
+    amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_state: Dict[str, Any] = field(default_factory=dict)
     actions_log: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -252,6 +255,7 @@ class HandState:
             "conflict_state": self.conflict_state,
             "table_center": self.table_center,
             "table_amount_state": dict(self.table_amount_state),
+            "amount_normalization": dict(self.amount_normalization),
             "action_state": dict(self.action_state),
             "actions_log": list(self.actions_log),
         }
@@ -275,6 +279,7 @@ class RenderState:
     updated_at: str
     seat_order: List[str] = field(default_factory=list)
     table_amount_state: Dict[str, Any] = field(default_factory=dict)
+    amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_annotations: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

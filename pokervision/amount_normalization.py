@@ -1,163 +1,137 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List, Optional
+
+CANONICAL_RING = {
+    2: ["BTN", "BB"],
+    3: ["BTN", "SB", "BB"],
+    4: ["BTN", "SB", "BB", "CO"],
+    5: ["BTN", "SB", "BB", "UTG", "CO"],
+    6: ["BTN", "SB", "BB", "UTG", "MP", "CO"],
+}
 
 
-EPSILON = 1e-9
-
-
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
+def _safe_float(value: Any) -> Optional[float]:
     try:
+        if value is None:
+            return None
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
-def _unique_positions(values: Iterable[str] | None) -> List[str]:
-    out: List[str] = []
-    seen: set[str] = set()
-    for value in values or []:
-        pos = str(value)
-        if not pos or pos in seen:
-            continue
-        seen.add(pos)
-        out.append(pos)
-    return out
+def _build_forced_blinds(
+    street: str,
+    player_count: int,
+    occupied_positions: List[str],
+) -> Dict[str, float]:
+    if street != "preflop":
+        return {}
 
+    occupied = set(occupied_positions)
+    forced: Dict[str, float] = {}
 
-def _canonical_positions(
-    player_count: int | None,
-    occupied_positions: Iterable[str] | None,
-    hero_position: str | None,
-    player_states: Dict[str, Dict[str, Any]] | None,
-) -> List[str]:
-    ordered = _unique_positions(occupied_positions)
-    if hero_position and hero_position not in ordered:
-        ordered.append(str(hero_position))
-    for position in (player_states or {}).keys():
-        if position not in ordered:
-            ordered.append(str(position))
-    # keep only non-empty strings
-    return [pos for pos in ordered if pos]
-
-
-def _forced_preflop_blinds(player_count: int | None, positions: List[str]) -> Dict[str, float]:
-    pos_set = set(positions)
-    if int(player_count or 0) == 2 or ({"BTN", "BB"} <= pos_set and "SB" not in pos_set):
-        forced: Dict[str, float] = {}
-        if "BTN" in pos_set:
+    if player_count == 2:
+        if "BTN" in occupied:
             forced["BTN"] = 0.5
-        if "BB" in pos_set:
+        if "BB" in occupied:
             forced["BB"] = 1.0
         return forced
 
-    forced = {}
-    if "SB" in pos_set:
+    if "SB" in occupied:
         forced["SB"] = 0.5
-    if "BB" in pos_set:
+    if "BB" in occupied:
         forced["BB"] = 1.0
     return forced
 
 
 def normalize_amount_contributions(
-    table_amount_state: Dict[str, Any] | None,
+    table_amount_state: Dict[str, Any],
     street: str,
-    player_count: int | None,
-    occupied_positions: Iterable[str] | None,
-    hero_position: str | None,
-    player_states: Dict[str, Dict[str, Any]] | None,
+    player_count: int,
+    occupied_positions: List[str],
+    hero_position: Optional[str],
+    player_states: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """
-    Canonical contribution normalizer used between table_amount_logic and action_inference.
+    state = table_amount_state if isinstance(table_amount_state, dict) else {}
+    posted_blinds = state.get("posted_blinds", {}) if isinstance(state.get("posted_blinds"), dict) else {}
+    bets_by_position = state.get("bets_by_position", {}) if isinstance(state.get("bets_by_position"), dict) else {}
 
-    Output contract:
-    - final_contribution_bb_by_pos
-    - final_contribution_street_bb_by_pos
+    ordered_positions = [
+        pos for pos in CANONICAL_RING.get(int(player_count or 0), []) if pos in list(occupied_positions or [])
+    ]
+    if not ordered_positions:
+        ordered_positions = list(occupied_positions or [])
 
-    For preflop:
-    - starts from forced blind baselines (SB=0.5, BB=1.0)
-    - for HU: BTN/SB=0.5, BB=1.0
-    - then overlays visible Chips regions
-    - posted_blinds are treated only as confirmation / diagnostics
-
-    For postflop:
-    - only visible Chips are treated as current-street contributions
-    - posted_blinds are kept only in diagnostics
-    """
-    amount_state = table_amount_state if isinstance(table_amount_state, dict) else {}
-    positions = _canonical_positions(player_count, occupied_positions, hero_position, player_states)
-
-    final_total: Dict[str, float] = {pos: 0.0 for pos in positions}
-    final_street: Dict[str, float] = {pos: 0.0 for pos in positions}
+    final_total: Dict[str, float] = {pos: 0.0 for pos in ordered_positions}
+    final_street: Dict[str, float] = {pos: 0.0 for pos in ordered_positions}
+    forced_blinds = _build_forced_blinds(street, int(player_count or 0), list(occupied_positions or []))
     visible_bets: Dict[str, float] = {}
+    blind_diagnostics: Dict[str, Dict[str, Any]] = {}
     warnings: List[str] = []
 
-    forced_blinds = _forced_preflop_blinds(player_count, positions) if street == "preflop" else {}
-    if street == "preflop":
-        for pos, amount in forced_blinds.items():
+    for pos, amount in forced_blinds.items():
+        if pos in final_total:
             final_total[pos] = amount
             final_street[pos] = amount
 
-    posted_blinds = amount_state.get("posted_blinds", {}) if isinstance(amount_state, dict) else {}
-    blind_diagnostics: Dict[str, Dict[str, Any]] = {}
-    for blind_name, payload in (posted_blinds or {}).items():
+    for blind_label, payload in posted_blinds.items():
         if not isinstance(payload, dict):
             continue
-        detected_amount = _safe_float(payload.get("amount_bb"))
-        matched_position = str(payload.get("matched_position") or blind_name)
-        expected_amount = forced_blinds.get(matched_position) if street == "preflop" else None
-        blind_diagnostics[str(blind_name)] = {
+        matched_position = str(payload.get("matched_position") or "")
+        amount_bb = _safe_float(payload.get("amount_bb"))
+        blind_diagnostics[blind_label] = {
             "matched_position": matched_position,
-            "detected_amount_bb": detected_amount,
-            "expected_amount_bb": expected_amount,
-            "used_as_source_of_truth": False,
-            "status": "ignored_for_street" if street != "preflop" else "diagnostic_only",
-            "warnings": list(payload.get("warnings", [])) if isinstance(payload.get("warnings", []), list) else [],
+            "amount_bb": amount_bb,
+            "warnings": list(payload.get("warnings", [])) if isinstance(payload.get("warnings"), list) else [],
+            "source": payload.get("source", blind_label),
+            "confirmed": bool(
+                matched_position
+                and matched_position in forced_blinds
+                and amount_bb is not None
+                and abs(forced_blinds[matched_position] - amount_bb) <= 1e-6
+            ),
         }
-        if street == "preflop" and detected_amount is not None and expected_amount is not None:
-            if abs(detected_amount - expected_amount) > 0.26:
+        if matched_position and matched_position in forced_blinds and amount_bb is not None:
+            expected = forced_blinds[matched_position]
+            if abs(expected - amount_bb) > 1e-6:
                 warnings.append(
-                    f"{blind_name}: detected blind {detected_amount:.3f}bb differs from forced baseline "
-                    f"{expected_amount:.3f}bb"
+                    f"{blind_label}: detected blind {amount_bb:.3f}bb differs from forced baseline {expected:.3f}bb"
                 )
 
-    bets_by_position = amount_state.get("bets_by_position", {}) if isinstance(amount_state, dict) else {}
-    for position, payload in (bets_by_position or {}).items():
+    for pos, payload in bets_by_position.items():
         if not isinstance(payload, dict):
             continue
-        amount = _safe_float(payload.get("amount_bb"))
-        if amount is None:
+        amount_bb = _safe_float(payload.get("amount_bb"))
+        if amount_bb is None:
             continue
-        pos = str(position)
-        visible_bets[pos] = amount
-        previous = final_street.get(pos, 0.0)
+        visible_bets[pos] = amount_bb
+        final_street[pos] = amount_bb
         if street == "preflop":
-            merged = max(previous, amount)
-            final_street[pos] = merged
-            final_total[pos] = max(final_total.get(pos, 0.0), merged)
+            final_total[pos] = max(final_total.get(pos, 0.0), amount_bb)
         else:
-            final_street[pos] = amount
-            final_total[pos] = amount
+            final_total[pos] = amount_bb
 
-    source_mode = "forced_blinds_plus_visible_chips" if street == "preflop" else "visible_chips_only"
-    unassigned = amount_state.get("unassigned_chips", []) if isinstance(amount_state, dict) else []
+    active_positions = [
+        pos
+        for pos in ordered_positions
+        if not bool((player_states.get(pos, {}) if isinstance(player_states, dict) else {}).get("is_fold", False))
+    ]
+
+    total_pot_payload = state.get("total_pot", {}) if isinstance(state.get("total_pot"), dict) else {}
+    total_pot_amount = _safe_float(total_pot_payload.get("amount_bb"))
 
     return {
         "street": street,
         "player_count": int(player_count or 0),
-        "occupied_positions": list(positions),
+        "occupied_positions": list(ordered_positions),
+        "active_positions": active_positions,
         "hero_position": hero_position,
-        "source_mode": source_mode,
-        "forced_blinds_by_position": dict(forced_blinds),
-        "visible_bets_by_position": dict(visible_bets),
-        "final_contribution_bb_by_pos": {pos: round(amount, 4) for pos, amount in final_total.items()},
-        "final_contribution_street_bb_by_pos": {pos: round(amount, 4) for pos, amount in final_street.items()},
-        "posted_blinds_snapshot": {
-            str(name): dict(payload) for name, payload in (posted_blinds or {}).items() if isinstance(payload, dict)
-        },
+        "forced_blinds_by_position": forced_blinds,
+        "visible_bets_by_position": visible_bets,
+        "final_contribution_bb_by_pos": final_total,
+        "final_contribution_street_bb_by_pos": final_street,
         "blind_diagnostics": blind_diagnostics,
-        "unassigned_chips_count": len(unassigned) if isinstance(unassigned, list) else 0,
-        "warnings": list(warnings),
+        "total_pot_bb": total_pot_amount,
+        "warnings": warnings,
     }

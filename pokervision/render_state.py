@@ -20,13 +20,18 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
     action_state = hand.action_state or {}
     last_actions = dict(action_state.get("last_actions_by_position", {}))
     bet_map = (hand.table_amount_state or {}).get("bets_by_position", {}) if isinstance(hand.table_amount_state, dict) else {}
-    seat_order = _build_display_seat_order(hand)
+    amount_norm = hand.amount_normalization or {}
+    normalized_street = (
+        amount_norm.get("final_contribution_street_bb_by_pos", {}) if isinstance(amount_norm, dict) else {}
+    )
 
+    seat_order = _build_display_seat_order(hand)
     for position in hand.occupied_positions:
         player_state = hand.player_states.get(position, {})
         is_fold = player_state.get("is_fold", False)
         is_hero = position == hand.hero_position
         bet_payload = bet_map.get(position, {}) if isinstance(bet_map, dict) else {}
+        normalized_bet = normalized_street.get(position) if isinstance(normalized_street, dict) else None
         players[position] = {
             "position": position,
             "occupied": True,
@@ -40,10 +45,11 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
             "state_warnings": list(player_state.get("warnings", [])),
             "cards_visible": is_hero and not is_fold,
             "show_card_backs": (not is_hero) and (not is_fold),
-            "current_bet_bb": bet_payload.get("amount_bb"),
+            "current_bet_bb": bet_payload.get("amount_bb") if bet_payload.get("amount_bb") is not None else normalized_bet,
             "current_bet_raw": bet_payload.get("raw_text", ""),
             "last_action": last_actions.get(position),
         }
+
     street = hand.street_state.get("current_street", "preflop")
     freshness = "live"
     warnings = []
@@ -58,6 +64,7 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         warnings.append("State is error")
     if hand.conflict_state:
         warnings.append(hand.conflict_state)
+
     return RenderState(
         hand_id=hand.hand_id,
         player_count=hand.player_count,
@@ -75,6 +82,7 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         updated_at=hand.updated_at,
         seat_order=seat_order,
         table_amount_state=dict(hand.table_amount_state),
+        amount_normalization=dict(hand.amount_normalization),
         action_annotations={
             "actions_log": list(hand.actions_log[-12:]),
             "last_actions_by_position": last_actions,

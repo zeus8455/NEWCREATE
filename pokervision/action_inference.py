@@ -11,10 +11,16 @@ CANONICAL_RING = {
 }
 
 
-def get_street_actor_order(player_count: int, street: str, occupied_positions: List[str], player_states: Dict[str, Dict[str, object]]) -> List[str]:
+def get_street_actor_order(
+    player_count: int,
+    street: str,
+    occupied_positions: List[str],
+    player_states: Dict[str, Dict[str, object]],
+) -> List[str]:
     ring = [pos for pos in CANONICAL_RING.get(player_count, []) if pos in occupied_positions]
     if not ring:
         return []
+
     if street == "preflop":
         if player_count == 2:
             start_pos = "BTN"
@@ -23,6 +29,7 @@ def get_street_actor_order(player_count: int, street: str, occupied_positions: L
     else:
         after_btn_preference = ["SB", "BB", "UTG", "MP", "CO", "BTN"]
         start_pos = next((pos for pos in after_btn_preference if pos in ring), ring[0])
+
     start_idx = ring.index(start_pos)
     ordered = ring[start_idx:] + ring[:start_idx]
     return [pos for pos in ordered if not player_states.get(pos, {}).get("is_fold", False)]
@@ -31,6 +38,7 @@ def get_street_actor_order(player_count: int, street: str, occupied_positions: L
 def infer_actions(previous_hand, analysis, settings) -> dict:
     street = analysis.street
     previous_action_state = dict(previous_hand.action_state) if previous_hand else {}
+
     if previous_action_state.get("street") != street:
         street_commitments: Dict[str, float] = {}
         current_highest = 0.0
@@ -66,6 +74,7 @@ def infer_actions(previous_hand, analysis, settings) -> dict:
         prev_player_state = previous_player_states.get(position, {})
         prev_fold = bool(prev_player_state.get("is_fold", False))
         is_fold = bool(player_state.get("is_fold", False))
+
         if is_fold and not prev_fold:
             action = {
                 "position": position,
@@ -83,7 +92,6 @@ def infer_actions(previous_hand, analysis, settings) -> dict:
 
         current_amount = current_bets.get(position, 0.0)
         previous_amount = street_commitments.get(position, 0.0)
-
         if current_amount > previous_amount + 1e-9:
             if street == "preflop":
                 if current_highest <= 0.0:
@@ -95,6 +103,7 @@ def infer_actions(previous_hand, analysis, settings) -> dict:
                     action_name = "BET"
                 else:
                     action_name = "CALL" if abs(current_amount - current_highest) <= 1e-9 else "RAISE"
+
             action = {
                 "position": position,
                 "street": street,
@@ -147,5 +156,6 @@ def infer_actions(previous_hand, analysis, settings) -> dict:
         "acted_positions": acted_positions,
         "last_actions_by_position": last_actions_by_position,
         "actions_this_frame": actions,
+        "amount_normalization": dict(getattr(analysis, "amount_normalization", {}) or {}),
     }
     return action_state

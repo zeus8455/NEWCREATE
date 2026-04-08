@@ -7,8 +7,14 @@ import cv2
 import numpy as np
 
 from .action_inference import infer_actions
+from .amount_normalization import normalize_amount_contributions
 from .config import Settings
-from .detectors import build_board_crop, build_hero_crop, build_player_state_crop, build_table_amount_crop
+from .detectors import (
+    build_board_crop,
+    build_hero_crop,
+    build_player_state_crop,
+    build_table_amount_crop,
+)
 from .hand_state import HandStateManager, MATCH_STRONG, MATCH_WEAK
 from .json_manager import save_hand_json
 from .models import BBox, Detection, FrameAnalysis, HandState
@@ -16,7 +22,13 @@ from .render_state import build_render_state
 from .storage import StorageManager
 from .table_amount_logic import build_table_amount_state
 from .table_logic import assign_positions, determine_hero_position
-from .validators import determine_street, validate_board_cards, validate_hero_cards, validate_player_state, validate_structure
+from .validators import (
+    determine_street,
+    validate_board_cards,
+    validate_hero_cards,
+    validate_player_state,
+    validate_structure,
+)
 
 
 @dataclass(slots=True)
@@ -37,17 +49,20 @@ def _draw_detections(image: np.ndarray, detections: list[Detection], color=(0, 2
 
 def _region_key(det: Detection) -> str:
     bbox = det.bbox
-    return (
-        f"{det.label}@"
-        f"{round(bbox.x1, 1)}:{round(bbox.y1, 1)}:{round(bbox.x2, 1)}:{round(bbox.y2, 1)}"
-    )
+    return f"{det.label}@{round(bbox.x1, 1)}:{round(bbox.y1, 1)}:{round(bbox.x2, 1)}:{round(bbox.y2, 1)}"
 
 
 def _localize(global_detections: list[Detection], origin: tuple[int, int]) -> list[Detection]:
     ox, oy = origin
     localized: list[Detection] = []
     for d in global_detections:
-        localized.append(Detection(d.label, BBox(d.bbox.x1 - ox, d.bbox.y1 - oy, d.bbox.x2 - ox, d.bbox.y2 - oy), d.confidence))
+        localized.append(
+            Detection(
+                d.label,
+                BBox(d.bbox.x1 - ox, d.bbox.y1 - oy, d.bbox.x2 - ox, d.bbox.y2 - oy),
+                d.confidence,
+            )
+        )
     return localized
 
 
@@ -60,27 +75,48 @@ class PokerVisionPipeline:
 
     def process_frame(self, frame) -> PipelineResult:
         self.hand_manager.mark_stale_if_needed(frame.timestamp)
-
         active = self.detector_backend.detect_active_hero(frame)
         overlay = _draw_detections(frame.image, active, color=(0, 255, 255))
-
         if not active:
             analysis = FrameAnalysis(frame.frame_id, frame.timestamp, False)
             return PipelineResult(
                 analysis=analysis,
                 hand=self.hand_manager.active_hand,
-                render_state=(self.hand_manager.active_hand.render_state_snapshot or None) if self.hand_manager.active_hand else None,
+                render_state=(self.hand_manager.active_hand.render_state_snapshot or None)
+                if self.hand_manager.active_hand
+                else None,
             )
 
         structure_dets = self.detector_backend.detect_structure(frame)
-        structure_val = validate_structure(structure_dets, self.settings.duplicate_iou_threshold, self.settings.duplicate_center_distance_px)
+        structure_val = validate_structure(
+            structure_dets,
+            self.settings.duplicate_iou_threshold,
+            self.settings.duplicate_center_distance_px,
+        )
         overlay = _draw_detections(overlay, structure_dets, color=(0, 200, 0))
-        analysis = FrameAnalysis(frame_id=frame.frame_id, timestamp=frame.timestamp, active_hero_found=True, structure_detections=structure_dets, validation={"structure_ok": structure_val.ok})
-
+        analysis = FrameAnalysis(
+            frame_id=frame.frame_id,
+            timestamp=frame.timestamp,
+            active_hero_found=True,
+            structure_detections=structure_dets,
+            validation={"structure_ok": structure_val.ok},
+        )
         if not structure_val.ok:
             analysis.errors.extend(structure_val.errors)
-            self.storage.save_failure_artifacts("structure", frame.frame_id, frame.image, overlay_frame=overlay, debug_images=[overlay])
-            self.hand_manager.register_error(self.hand_manager.active_hand, "structure", "; ".join(structure_val.errors), frame.frame_id, True)
+            self.storage.save_failure_artifacts(
+                "structure",
+                frame.frame_id,
+                frame.image,
+                overlay_frame=overlay,
+                debug_images=[overlay],
+            )
+            self.hand_manager.register_error(
+                self.hand_manager.active_hand,
+                "structure",
+                "; ".join(structure_val.errors),
+                frame.frame_id,
+                True,
+            )
             return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
 
         cleaned = structure_val.meta["cleaned"]
@@ -95,8 +131,20 @@ class PokerVisionPipeline:
         street_val = determine_street(cleaned)
         if not street_val.ok:
             analysis.errors.extend(street_val.errors)
-            self.storage.save_failure_artifacts("street", frame.frame_id, frame.image, overlay_frame=overlay, debug_images=[overlay])
-            self.hand_manager.register_error(self.hand_manager.active_hand, "street", "; ".join(street_val.errors), frame.frame_id, True)
+            self.storage.save_failure_artifacts(
+                "street",
+                frame.frame_id,
+                frame.image,
+                overlay_frame=overlay,
+                debug_images=[overlay],
+            )
+            self.hand_manager.register_error(
+                self.hand_manager.active_hand,
+                "street",
+                "; ".join(street_val.errors),
+                frame.frame_id,
+                True,
+            )
             return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
 
         street = str(street_val.meta["street"])
@@ -157,6 +205,7 @@ class PokerVisionPipeline:
             table_amount_digit_map[region_key] = digit_local
             analysis.table_amount_digit_detections[region_id] = digit_global
             analysis.table_amount_digit_detections[region_key] = digit_global
+
         table_amount_val = build_table_amount_state(
             table_amount_regions,
             table_amount_digit_map,
@@ -172,6 +221,17 @@ class PokerVisionPipeline:
         if table_amount_val.errors:
             analysis.warnings.extend(table_amount_val.errors)
         analysis.validation["table_amount_ok"] = table_amount_val.ok
+
+        analysis.amount_normalization = normalize_amount_contributions(
+            analysis.table_amount_state,
+            street,
+            int(analysis.player_count or 0),
+            list(analysis.occupied_positions),
+            analysis.hero_position,
+            analysis.player_states,
+        )
+        if analysis.amount_normalization.get("warnings"):
+            analysis.warnings.extend(list(analysis.amount_normalization.get("warnings", [])))
 
         if self.settings.action_reconstruction_enabled:
             analysis.action_inference = infer_actions(self.hand_manager.active_hand, analysis, self.settings)
@@ -203,7 +263,13 @@ class PokerVisionPipeline:
                 table_amount_overlays=table_amount_overlays,
                 debug_images=[overlay, hero_overlay],
             )
-            self.hand_manager.register_error(self.hand_manager.active_hand, "hero_cards", "; ".join(hero_val.errors), frame.frame_id, True)
+            self.hand_manager.register_error(
+                self.hand_manager.active_hand,
+                "hero_cards",
+                "; ".join(hero_val.errors),
+                frame.frame_id,
+                True,
+            )
             return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
 
         board_crop = None
@@ -226,8 +292,15 @@ class PokerVisionPipeline:
                     table_amount_overlays=table_amount_overlays,
                     debug_images=[overlay, hero_overlay],
                 )
-                self.hand_manager.register_error(self.hand_manager.active_hand, "board_marker", f"Missing {marker_label} marker", frame.frame_id, True)
+                self.hand_manager.register_error(
+                    self.hand_manager.active_hand,
+                    "board_marker",
+                    f"Missing {marker_label} marker",
+                    frame.frame_id,
+                    True,
+                )
                 return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
+
             board_bbox = marker.bbox
             board_crop, board_origin = build_board_crop(frame.image, board_bbox, self.settings)
             board_global_dets = self.detector_backend.detect_board_cards(frame, board_bbox, street)
@@ -269,12 +342,20 @@ class PokerVisionPipeline:
                         table_amount_overlays=table_amount_overlays,
                         debug_images=[overlay, hero_overlay] + ([board_overlay] if board_overlay is not None else []),
                     )
-                    self.hand_manager.register_error(self.hand_manager.active_hand, "board_cards", "; ".join(board_val.errors), frame.frame_id, True)
+                    self.hand_manager.register_error(
+                        self.hand_manager.active_hand,
+                        "board_cards",
+                        "; ".join(board_val.errors),
+                        frame.frame_id,
+                        True,
+                    )
                     return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
 
         previous_street = self.hand_manager.active_hand.street_state.get("current_street") if self.hand_manager.active_hand else None
         hand, decision, created_new = self.hand_manager.update_or_create(analysis)
-        repeated_same_street = not created_new and previous_street == analysis.street and decision.status in {MATCH_STRONG, MATCH_WEAK}
+        repeated_same_street = (
+            not created_new and previous_street == analysis.street and decision.status in {MATCH_STRONG, MATCH_WEAK}
+        )
         save_only_raw = repeated_same_street and not self.settings.normal_mode_save_repeated_frames
         artifacts = self.storage.save_pipeline_artifacts(
             hand.hand_id,
@@ -289,7 +370,11 @@ class PokerVisionPipeline:
             player_overlays=player_overlays,
             table_amount_crops=table_amount_crops,
             table_amount_overlays=table_amount_overlays,
-            debug_images=[img for img in [overlay, hero_overlay, board_overlay, *player_overlays.values(), *table_amount_overlays.values()] if img is not None],
+            debug_images=[
+                img
+                for img in [overlay, hero_overlay, board_overlay, *player_overlays.values(), *table_amount_overlays.values()]
+                if img is not None
+            ],
             save_only_raw=save_only_raw,
         )
         hand.artifacts = artifacts.to_dict()

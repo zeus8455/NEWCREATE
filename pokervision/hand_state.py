@@ -20,7 +20,13 @@ class MatchDecision:
 
 
 class HandStateManager:
-    def __init__(self, schema_version: str, stale_timeout_sec: float, close_timeout_sec: float, table_center_max_shift_px: float = 120.0):
+    def __init__(
+        self,
+        schema_version: str,
+        stale_timeout_sec: float,
+        close_timeout_sec: float,
+        table_center_max_shift_px: float = 120.0,
+    ):
         self.schema_version = schema_version
         self.stale_timeout_sec = stale_timeout_sec
         self.close_timeout_sec = close_timeout_sec
@@ -90,6 +96,7 @@ class HandStateManager:
             },
             table_center=analysis.table_center,
             table_amount_state=dict(analysis.table_amount_state),
+            amount_normalization=dict(analysis.amount_normalization),
             action_state=dict(analysis.action_inference),
             actions_log=list(analysis.action_inference.get("actions_this_frame", [])),
         )
@@ -122,7 +129,10 @@ class HandStateManager:
             new_center = analysis.positions[position].get("center", {})
             if not old_center or not new_center:
                 continue
-            shift = hypot(old_center.get("x", 0.0) - new_center.get("x", 0.0), old_center.get("y", 0.0) - new_center.get("y", 0.0))
+            shift = hypot(
+                old_center.get("x", 0.0) - new_center.get("x", 0.0),
+                old_center.get("y", 0.0) - new_center.get("y", 0.0),
+            )
             if shift > self.table_center_max_shift_px:
                 return True
         return False
@@ -147,14 +157,11 @@ class HandStateManager:
             notes.append(f"table center shifted by {center_shift:.1f}px")
         if self._position_geometry_conflict(hand, analysis):
             notes.append("seat geometry changed")
-
         current_street = hand.street_state.get("current_street", "preflop")
         if not self._street_transition_allowed(current_street, analysis.street):
             notes.append(f"street transition {current_street}->{analysis.street} invalid")
-
         if self._player_states_changed(hand, analysis):
             notes.append("player states changed")
-
         if notes:
             return MatchDecision(MATCH_WEAK, "; ".join(notes))
         return MatchDecision(MATCH_STRONG, "same hero cards confirmed")
@@ -193,6 +200,7 @@ class HandStateManager:
         hand.positions = dict(analysis.positions)
         hand.table_center = analysis.table_center
         hand.table_amount_state = dict(analysis.table_amount_state)
+        hand.amount_normalization = dict(analysis.amount_normalization)
         hand.action_state = dict(analysis.action_inference)
         hand.actions_log.extend(list(analysis.action_inference.get("actions_this_frame", [])))
         hand.board_cards = list(analysis.board_cards) if analysis.board_cards else hand.board_cards
@@ -207,24 +215,33 @@ class HandStateManager:
         hand.processing_summary["successful_frames"] += 1
         self._sync_snapshot_status(hand)
 
-    def register_error(self, hand: Optional[HandState], stage: str, message: str, frame_id: Optional[str], fatal_for_frame: bool = False) -> None:
+    def register_error(
+        self,
+        hand: Optional[HandState],
+        stage: str,
+        message: str,
+        frame_id: Optional[str],
+        fatal_for_frame: bool = False,
+    ) -> None:
         if hand is None:
             return
         hand.errors.append(HandError(utc_now_iso(), stage, message, frame_id, fatal_for_frame).to_dict())
         hand.processing_summary["failed_frames"] += 1
         if frame_id is not None:
-            hand.frames_log.append({
-                "frame_id": frame_id,
-                "timestamp": utc_now_iso(),
-                "active_hero_found": True,
-                "matched_existing_hand": True,
-                "assigned_to_hand_id": hand.hand_id,
-                "street_detected": hand.street_state.get("current_street", "preflop"),
-                "player_state_summary": {},
-                "processing_status": "error",
-                "error_stage": stage,
-                "error_message": message,
-            })
+            hand.frames_log.append(
+                {
+                    "frame_id": frame_id,
+                    "timestamp": utc_now_iso(),
+                    "active_hero_found": True,
+                    "matched_existing_hand": True,
+                    "assigned_to_hand_id": hand.hand_id,
+                    "street_detected": hand.street_state.get("current_street", "preflop"),
+                    "player_state_summary": {},
+                    "processing_status": "error",
+                    "error_stage": stage,
+                    "error_message": message,
+                }
+            )
         self._sync_snapshot_status(hand)
 
     def mark_stale_if_needed(self, now_timestamp: str) -> bool:
@@ -233,32 +250,43 @@ class HandStateManager:
         hand = self.active_hand
         age_sec = self._seconds_between(hand.last_seen_at, now_timestamp)
         previous_status = hand.status
+
         # Не закрываем hand автоматически: same HERO cards должны позволять продолжить ту же раздачу.
         if age_sec >= self.stale_timeout_sec and hand.status == "active":
             hand.status = "stale"
             hand.updated_at = now_timestamp
+
         changed = hand.status != previous_status
         if changed:
             self._sync_snapshot_status(hand)
         return changed
 
-    def _append_frame_log(self, hand: HandState, analysis: FrameAnalysis, matched_existing: bool, processing_status: str) -> None:
-        hand.frames_log.append({
-            "frame_id": analysis.frame_id,
-            "timestamp": analysis.timestamp,
-            "active_hero_found": analysis.active_hero_found,
-            "matched_existing_hand": matched_existing,
-            "assigned_to_hand_id": hand.hand_id,
-            "street_detected": analysis.street,
-            "player_state_summary": {
-                position: {
-                    "is_fold": payload.get("is_fold", False),
-                    "is_all_in": payload.get("is_all_in", False),
-                    "stack_bb": payload.get("stack_bb"),
-                }
-                for position, payload in analysis.player_states.items()
-            },
-            "table_amount_summary": dict(analysis.table_amount_state),
-            "action_summary": list(analysis.action_inference.get("actions_this_frame", [])),
-            "processing_status": processing_status,
-        })
+    def _append_frame_log(
+        self,
+        hand: HandState,
+        analysis: FrameAnalysis,
+        matched_existing: bool,
+        processing_status: str,
+    ) -> None:
+        hand.frames_log.append(
+            {
+                "frame_id": analysis.frame_id,
+                "timestamp": analysis.timestamp,
+                "active_hero_found": analysis.active_hero_found,
+                "matched_existing_hand": matched_existing,
+                "assigned_to_hand_id": hand.hand_id,
+                "street_detected": analysis.street,
+                "player_state_summary": {
+                    position: {
+                        "is_fold": payload.get("is_fold", False),
+                        "is_all_in": payload.get("is_all_in", False),
+                        "stack_bb": payload.get("stack_bb"),
+                    }
+                    for position, payload in analysis.player_states.items()
+                },
+                "table_amount_summary": dict(analysis.table_amount_state),
+                "amount_normalization_summary": dict(analysis.amount_normalization),
+                "action_summary": list(analysis.action_inference.get("actions_this_frame", [])),
+                "processing_status": processing_status,
+            }
+        )
