@@ -88,6 +88,33 @@ def _candidate_positions(
     return live or names
 
 
+def _score_chip_candidates(
+    region_center: Point,
+    candidate_names: List[str],
+    position_centers: Dict[str, Point],
+    table_center: Point | None,
+    settings,
+) -> List[Tuple[str, float, Dict[str, float]]]:
+    scored: List[Tuple[str, float, Dict[str, float]]] = []
+    for pos_name in candidate_names:
+        pos_center = position_centers[pos_name]
+        if table_center is None:
+            seat_dist = _distance(region_center, pos_center)
+            scored.append((pos_name, seat_dist, {
+                "score": seat_dist,
+                "target_distance_px": seat_dist,
+                "seat_distance_px": seat_dist,
+                "line_distance_px": seat_dist,
+                "projection_ratio": 0.0,
+                "outside_penalty_px": 0.0,
+            }))
+        else:
+            score, meta = _chips_match_score(region_center, pos_center, table_center, settings)
+            scored.append((pos_name, score, meta))
+    scored.sort(key=lambda item: item[1])
+    return scored
+
+
 def _chips_match_score(chips_center: Point, position_center: Point, table_center: Point, settings) -> tuple[float, Dict[str, float]]:
     anchor_t = float(getattr(settings, "chips_target_towards_table_center", 0.58))
     segment_slack = float(getattr(settings, "chips_projection_outside_segment_slack", 0.22))
@@ -188,42 +215,54 @@ def build_table_amount_state(
                 state.unassigned_chips.append(entry)
                 continue
 
-            candidate_names = [name for name in live_positions if name in position_centers]
-            if not candidate_names:
-                candidate_names = list(position_centers.keys())
-            if not candidate_names:
+            live_candidate_names = [name for name in live_positions if name in position_centers]
+            all_candidate_names = [name for name in position_centers.keys()]
+            if not live_candidate_names:
+                live_candidate_names = list(all_candidate_names)
+            if not all_candidate_names:
                 entry.setdefault("warnings", []).append("No logical positions available for chips matching")
                 state.unassigned_chips.append(entry)
                 continue
 
-            scored: List[Tuple[str, float, Dict[str, float]]] = []
-            for pos_name in candidate_names:
-                pos_center = position_centers[pos_name]
-                if table_center is None:
-                    seat_dist = _distance(region_center, pos_center)
-                    scored.append((pos_name, seat_dist, {
-                        "score": seat_dist,
-                        "target_distance_px": seat_dist,
-                        "seat_distance_px": seat_dist,
-                        "line_distance_px": seat_dist,
-                        "projection_ratio": 0.0,
-                        "outside_penalty_px": 0.0,
-                    }))
-                else:
-                    score, meta = _chips_match_score(region_center, pos_center, table_center, settings)
-                    scored.append((pos_name, score, meta))
-            scored.sort(key=lambda item: item[1])
+            scored_live = _score_chip_candidates(region_center, live_candidate_names, position_centers, table_center, settings)
+            scored_all = _score_chip_candidates(region_center, all_candidate_names, position_centers, table_center, settings)
 
-            best_pos, best_score, best_meta = scored[0]
-            second_score = scored[1][1] if len(scored) > 1 else None
+            scored = scored_live
+            match_scope = "live_only"
+            best_pos, best_score, best_meta = scored_live[0]
+            second_score = scored_live[1][1] if len(scored_live) > 1 else None
+            ambiguous_live = second_score is not None and abs(second_score - best_score) <= settings.chips_ambiguity_margin_px
+            max_distance = settings.chips_to_position_max_distance_px
+            fallback_margin = max(6.0, float(getattr(settings, "chips_ambiguity_margin_px", 0.0)) / 2.0)
+
+            if street == "preflop" and scored_all:
+                best_all_pos, best_all_score, best_all_meta = scored_all[0]
+                second_all_score = scored_all[1][1] if len(scored_all) > 1 else None
+                ambiguous_all = second_all_score is not None and abs(second_all_score - best_all_score) <= settings.chips_ambiguity_margin_px
+                best_all_is_folded = bool(player_states and player_states.get(best_all_pos, {}).get("is_fold", False))
+                should_fallback = False
+                if best_all_is_folded and best_all_score <= max_distance:
+                    if best_score > max_distance or ambiguous_live:
+                        should_fallback = True
+                    elif best_all_pos != best_pos and best_all_score + fallback_margin < best_score:
+                        should_fallback = True
+                if should_fallback and not ambiguous_all:
+                    scored = scored_all
+                    match_scope = "all_positions_fallback"
+                    best_pos, best_score, best_meta = best_all_pos, best_all_score, best_all_meta
+                    second_score = second_all_score
+                    entry.setdefault("warnings", []).append("Matched chips to folded position as residual preflop contribution")
+
             entry["matched_position"] = best_pos
             entry["match_score_px"] = round(best_score, 3)
             entry["match_details"] = best_meta
             entry["candidate_positions"] = [name for name, _, _ in scored]
             entry["street"] = street
-            entry["matched_among_live_positions_only"] = bool(player_states)
+            entry["matched_among_live_positions_only"] = match_scope == "live_only"
+            entry["match_scope"] = match_scope
+            entry["matched_to_folded_position"] = bool(player_states and player_states.get(best_pos, {}).get("is_fold", False))
 
-            if best_score > settings.chips_to_position_max_distance_px:
+            if best_score > max_distance:
                 entry.setdefault("warnings", []).append("Chips too far from any logical betting lane")
                 state.unassigned_chips.append(entry)
                 continue

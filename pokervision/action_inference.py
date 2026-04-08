@@ -44,17 +44,24 @@ def get_street_actor_order(
     street: str,
     occupied_positions: List[str],
     player_states: Dict[str, Dict[str, object]],
+    contributions: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     ring = [pos for pos in CANONICAL_RING.get(player_count, []) if pos in occupied_positions]
     if not ring:
         return []
     if street == "preflop":
         ordered = [pos for pos in PREFLOP_ORDER.get(player_count, ring) if pos in ring]
-    else:
-        after_btn_preference = ["SB", "BB", "UTG", "MP", "CO", "BTN"]
-        start_pos = next((pos for pos in after_btn_preference if pos in ring), ring[0])
-        start_idx = ring.index(start_pos)
-        ordered = ring[start_idx:] + ring[:start_idx]
+        # Preflop reconstruction must keep folded positions that still have money
+        # on the table, otherwise open/call/3bet lines collapse after later folds.
+        return [
+            pos for pos in ordered
+            if (not _player_is_folded(player_states, pos))
+            or _safe_float((contributions or {}).get(pos), 0.0) > EPS
+        ]
+    after_btn_preference = ["SB", "BB", "UTG", "MP", "CO", "BTN"]
+    start_pos = next((pos for pos in after_btn_preference if pos in ring), ring[0])
+    start_idx = ring.index(start_pos)
+    ordered = ring[start_idx:] + ring[:start_idx]
     return [pos for pos in ordered if not _player_is_folded(player_states, pos)]
 
 
@@ -260,17 +267,19 @@ def _build_preflop_action_record(
 
 def _infer_preflop_actions(previous_hand, analysis, settings) -> dict:
     player_count = int(getattr(analysis, "player_count", 0) or 0)
+    preflop_contribs, preflop_forced, preflop_visible = _current_preflop_contributions(analysis)
     actor_order = get_street_actor_order(
         player_count,
         "preflop",
         list(getattr(analysis, "occupied_positions", []) or []),
         getattr(analysis, "player_states", {}) or {},
+        contributions=preflop_contribs,
     )
     state = _initial_preflop_state(previous_hand, analysis, actor_order)
     street_commitments: Dict[str, float] = dict(state["street_commitments"])
-    current_contribs: Dict[str, float] = dict(state["current_contribs"])
-    forced: Dict[str, float] = dict(state["forced"])
-    visible: Dict[str, float] = dict(state["visible"])
+    current_contribs: Dict[str, float] = dict(preflop_contribs or state["current_contribs"])
+    forced: Dict[str, float] = dict(preflop_forced or state["forced"])
+    visible: Dict[str, float] = dict(preflop_visible or state["visible"])
     current_price_to_call = _safe_float(state["current_price_to_call"], 1.0)
     raise_level = int(state["raise_level"])
     limpers: List[str] = list(state["limpers"])
@@ -290,7 +299,14 @@ def _infer_preflop_actions(previous_hand, analysis, settings) -> dict:
         prev_player_state = (previous_player_states or {}).get(position, {}) or {}
         prev_fold = bool(prev_player_state.get("is_fold", False))
         is_fold = bool(player_state.get("is_fold", False))
-        if is_fold and not prev_fold:
+
+        current_amount = _safe_float(current_contribs.get(position))
+        previous_amount = _safe_float(street_commitments.get(position))
+
+        # On preflop snapshots we may see a folded player whose chips still remain
+        # on the table. In that case we must reconstruct the contribution first and
+        # not let the fold marker erase that historical action.
+        if is_fold and not prev_fold and current_amount <= previous_amount + EPS:
             action = {
                 "position": position,
                 "street": "preflop",
@@ -309,8 +325,6 @@ def _infer_preflop_actions(previous_hand, analysis, settings) -> dict:
                 acted_positions.append(position)
             continue
 
-        current_amount = _safe_float(current_contribs.get(position))
-        previous_amount = _safe_float(street_commitments.get(position))
         if current_amount <= previous_amount + EPS:
             continue
 
