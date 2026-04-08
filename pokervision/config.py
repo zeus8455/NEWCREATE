@@ -2,115 +2,116 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict
 
 
 @dataclass(slots=True)
-class Settings:
-    schema_version: str = "1.1"
-
-    active_hero_model_path: str = r"C:\PokerAI\AI_detect\Active_Hero\weights"
-    table_structure_model_path: str = r"C:\PokerAI\AI_detect\Player_Seat\weights"
-    hero_cards_model_path: str = r"C:\PokerAI\AI_detect\All_Cards\weights"
-    board_cards_model_path: str = r"C:\PokerAI\AI_detect\All_Cards\weights"
-    player_state_model_path: str = r"C:\PokerAI\AI_detect\ChipsFold_from_scratch_train\weights"
-    table_amount_model_path: str = r"C:\PokerAI\AI_detect\TotalPot_chips_SB_BB\weights"
-    table_amount_digits_model_path: str = r"C:\PokerAI\AI_detect\0_9_Chips\weights"
-
-    root_dir: Path = Path(r"C:\PokerAI\PokerVision\PokerVision_DataSafeFiles")
-    hands_dir_name: str = "hands"
-    logs_dir_name: str = "logs"
-    temp_dir_name: str = "temp"
-
-    active_hero_conf: float = 0.50
-    table_conf: float = 0.40
-    card_conf: float = 0.35
-    player_state_conf: float = 0.30
-    table_amount_conf: float = 0.35
-    table_amount_digits_conf: float = 0.30
-    duplicate_iou_threshold: float = 0.65
-    nms_iou_threshold: float = 0.45
-    duplicate_center_distance_px: float = 32.0
-    seat_match_max_distance_px: float = 95.0
-    table_center_max_shift_px: float = 120.0
-    frame_debounce_ms: int = 200
-    hand_stale_timeout_sec: float = 3.5
-    hand_close_timeout_sec: float = 8.0
-    max_retry_per_stage: int = 1
-    frame_queue_size: int = 2
-
-    strict_hero_crop_to_structure_bbox: bool = True
-    strict_board_crop_to_marker_bbox: bool = True
-    strict_player_state_crop_to_structure_bbox: bool = True
-    strict_table_amount_crop_to_region_bbox: bool = True
-    hero_crop_pad_x_ratio: float = 0.65
-    hero_crop_pad_top_ratio: float = 1.35
-    hero_crop_pad_bottom_ratio: float = 0.40
-    board_crop_pad_x_ratio: float = 2.20
-    board_crop_pad_y_ratio: float = 1.20
-    player_state_crop_pad_x_ratio: float = 0.20
-    player_state_crop_pad_top_ratio: float = 0.10
-    player_state_crop_pad_bottom_ratio: float = 0.20
-    player_state_lower_band_ratio: float = 0.55
-    player_state_token_iou_threshold: float = 0.50
-    player_state_token_center_threshold_px: float = 18.0
-    board_min_crop_width_px: int = 220
-    board_min_crop_height_px: int = 90
-    monitor_index: int = 1
-
-    table_amount_region_iou_threshold: float = 0.55
-    table_amount_region_center_threshold_px: float = 24.0
-    table_amount_digit_iou_threshold: float = 0.50
-    table_amount_digit_center_threshold_px: float = 14.0
-    chips_to_position_max_distance_px: float = 240.0
-    chips_ambiguity_margin_px: float = 28.0
-    table_pot_center_exclusion_radius_px: float = 160.0
-    blind_marker_to_position_max_distance_px: float = 200.0
-    chips_target_towards_table_center: float = 0.55
-    chips_line_distance_weight: float = 0.60
-    chips_projection_outside_segment_slack: float = 0.22
-    chips_projection_penalty_scale_px: float = 220.0
-    action_state_stability_frames: int = 1
-    action_reconstruction_enabled: bool = True
-    infer_checks_without_explicit_evidence: bool = False
-    show_bets_in_renderer: bool = True
-    show_pot_in_renderer: bool = True
-    show_last_action_labels: bool = True
-
-    normalize_short_stack_to_40bb: bool = False
-    short_stack_min_inclusive_bb: float = 0.0
-    short_stack_max_exclusive_bb: float = 20.0
-    short_stack_forced_value_bb: float = 40.0
-
-    debug_mode: bool = True
-    save_debug_on_error: bool = True
-    normal_mode_save_repeated_frames: bool = False
-    keep_temp_on_exit: bool = False
-    keep_render_snapshots: bool = False
-
-    ui_refresh_ms: int = 100
-    use_pyside6: bool = True
-
-    mock_table_size: tuple[int, int] = (1280, 720)
-    mock_player_count: int = 6
-
-    position_layouts: Dict[int, Dict[str, tuple[float, float]]] = field(default_factory=lambda: {
-        2: {"BTN": (0.50, 0.82), "BB": (0.50, 0.18)},
-        3: {"BTN": (0.50, 0.82), "SB": (0.82, 0.50), "BB": (0.18, 0.50)},
-        4: {"BTN": (0.50, 0.82), "SB": (0.84, 0.60), "BB": (0.78, 0.25), "CO": (0.20, 0.40)},
-        5: {"BTN": (0.50, 0.82), "SB": (0.86, 0.63), "BB": (0.82, 0.28), "UTG": (0.50, 0.14), "CO": (0.18, 0.45)},
-        6: {"BTN": (0.50, 0.84), "SB": (0.86, 0.66), "BB": (0.82, 0.30), "UTG": (0.52, 0.14), "MP": (0.20, 0.26), "CO": (0.15, 0.62)},
-    })
-
-    def hands_dir(self) -> Path:
-        return self.root_dir / self.hands_dir_name
-
-    def logs_dir(self) -> Path:
-        return self.root_dir / self.logs_dir_name
-
-    def temp_dir(self) -> Path:
-        return self.root_dir / self.temp_dir_name
+class ModelPaths:
+    active_hero: str = r"C:\PokerAI\AI_detect\Active_Hero\weights\best.pt"
+    players_seat: str = r"C:\PokerAI\AI_detect\Player_Seat\weights\best.pt"
+    all_cards: str = r"C:\PokerAI\AI_detect\All_Cards\weights\best.pt"
 
 
-def get_default_settings() -> Settings:
-    return Settings()
+@dataclass(slots=True)
+class Thresholds:
+    active_hero_conf: float = 0.35
+    players_seat_conf: float = 0.30
+    all_cards_conf: float = 0.28
+    duplicate_iou: float = 0.55
+    seat_duplicate_iou: float = 0.45
+    btn_conflict_iou: float = 0.30
+    street_duplicate_iou: float = 0.35
+    card_duplicate_iou: float = 0.30
+    card_center_distance_px: int = 28
+
+
+@dataclass(slots=True)
+class CropSettings:
+    image_ext: str = "png"
+
+
+@dataclass(slots=True)
+class RuntimeSettings:
+    capture_interval_seconds: float = 1.0
+    post_cycle_pause_seconds: float = 3.0
+    ui_refresh_ms: int = 400
+    save_raw_frame: bool = True
+    save_overlay_frame: bool = True
+    use_mock_detectors: bool = False
+
+
+@dataclass(slots=True)
+class OutputSettings:
+    # Все артефакты проекта теперь пишутся сюда.
+    base_dir: Path = field(default_factory=lambda: Path(r"C:\PokerAI\NEWCREATE"))
+    state_json_name: str = "current_hand_state.json"
+    last_frame_json_name: str = "last_frame_analysis.json"
+
+
+@dataclass(slots=True)
+class AppConfig:
+    model_paths: ModelPaths = field(default_factory=ModelPaths)
+    thresholds: Thresholds = field(default_factory=Thresholds)
+    crops: CropSettings = field(default_factory=CropSettings)
+    runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
+    output: OutputSettings = field(default_factory=OutputSettings)
+
+    @property
+    def state_json_path(self) -> Path:
+        return self.output.base_dir / self.output.state_json_name
+
+    @property
+    def last_frame_json_path(self) -> Path:
+        return self.output.base_dir / self.output.last_frame_json_name
+
+
+POSITION_LABELS_BY_COUNT: dict[int, list[str]] = {
+    2: ["BTN", "BB"],
+    3: ["BTN", "SB", "BB"],
+    4: ["BTN", "SB", "BB", "CO"],
+    5: ["BTN", "SB", "BB", "UTG", "CO"],
+    6: ["BTN", "SB", "BB", "UTG", "MP", "CO"],
+}
+
+ACTIVE_HERO_CLASS_ALIASES = {"activehero", "active_hero", "hero_active", "active-hero"}
+PLAYER_SEAT_CLASS_ALIASES = {"player_seat", "player-seat", "seat", "playerseat"}
+BTN_CLASS_ALIASES = {"btn", "dealer_button", "button"}
+STREET_CLASS_ALIASES = {
+    "flop": {"flop"},
+    "turn": {"turn"},
+    "river": {"river"},
+}
+SUIT_ALIASES = {
+    "spades": "s",
+    "spade": "s",
+    "s": "s",
+    "hearts": "h",
+    "heart": "h",
+    "h": "h",
+    "diamonds": "d",
+    "diamond": "d",
+    "d": "d",
+    "clubs": "c",
+    "club": "c",
+    "c": "c",
+}
+RANK_ALIASES = {
+    "a": "A",
+    "ace": "A",
+    "k": "K",
+    "king": "K",
+    "q": "Q",
+    "queen": "Q",
+    "j": "J",
+    "jack": "J",
+    "t": "T",
+    "10": "T",
+    "ten": "T",
+    "9": "9",
+    "8": "8",
+    "7": "7",
+    "6": "6",
+    "5": "5",
+    "4": "4",
+    "3": "3",
+    "2": "2",
+}
