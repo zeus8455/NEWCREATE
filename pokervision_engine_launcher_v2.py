@@ -248,11 +248,49 @@ class EngineBridge:
             return hero_stack
         return min([hero_stack, *villain_stacks])
 
+    def _legacy_action_to_semantic(self, action_name: str) -> str:
+        action = str(action_name or "").upper()
+        if action == "LIMP":
+            return "limp"
+        if action == "OPEN":
+            return "open_raise"
+        if action == "CALL":
+            return "call"
+        if action == "CHECK":
+            return "check"
+        if action == "RAISE":
+            return "raise"
+        return action.lower()
+
+    def _normalized_preflop_action(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(item)
+        semantic = str(payload.get("semantic_action") or "").strip().lower()
+        if not semantic:
+            semantic = self._legacy_action_to_semantic(str(payload.get("action", "")))
+            if semantic:
+                payload["semantic_action"] = semantic
+        if not payload.get("engine_action") and semantic:
+            if semantic in {"limp", "call"}:
+                payload["engine_action"] = "call"
+            elif semantic == "check":
+                payload["engine_action"] = "check"
+            else:
+                payload["engine_action"] = "raise"
+        if payload.get("final_contribution_bb") is None and payload.get("amount_bb") is not None:
+            payload["final_contribution_bb"] = payload.get("amount_bb")
+        if payload.get("action") in {None, ""} and semantic:
+            payload["action"] = semantic.upper()
+        return payload
+
     def _street_actions(self, hand, street: str) -> List[Dict[str, Any]]:
         actions: List[Dict[str, Any]] = []
         for item in list(hand.actions_log or []):
-            if str(item.get("street", "")).lower() == street.lower():
-                actions.append(dict(item))
+            if str(item.get("street", "")).lower() != street.lower():
+                continue
+            payload = dict(item)
+            if street.lower() == "preflop":
+                payload = self._normalized_preflop_action(payload)
+            actions.append(payload)
         return actions
 
     def _ordered_positions(self, hand) -> List[str]:
@@ -321,31 +359,59 @@ class EngineBridge:
 
         return None
 
-    def _apply_preflop_action(self, state: ReplayState, actor_pos: str, action_name: str) -> None:
-        action = str(action_name or "").upper()
+    def _apply_preflop_action(self, state: ReplayState, actor_pos: str, action_payload: Dict[str, Any]) -> None:
+        payload = self._normalized_preflop_action(action_payload)
+        semantic = str(payload.get("semantic_action") or "").strip().lower()
+        legacy = str(payload.get("action") or "").upper()
+        action = semantic or self._legacy_action_to_semantic(legacy)
         flags = state.flags(actor_pos)
 
-        if action == "LIMP":
+        if action == "check":
+            flags.last_voluntary = "CHECK"
+            return
+
+        if action == "limp":
             if actor_pos not in state.limpers and state.opener is None:
                 state.limpers.append(actor_pos)
             flags.limped = True
-            flags.last_voluntary = action
+            flags.last_voluntary = "LIMP"
             return
 
-        if action == "OPEN":
+        if action in {"open_raise", "iso_raise"}:
             if state.opener is None:
                 state.opener = actor_pos
             flags.opened = True
-            flags.last_voluntary = action
+            flags.last_voluntary = action.upper()
             return
 
-        if action == "CALL":
-            if state.opener is not None and state.three_bettor is None:
+        if action == "call":
+            if state.opener is not None and state.three_bettor is None and actor_pos not in state.callers_after_open:
                 state.callers_after_open.append(actor_pos)
-            flags.last_voluntary = action
+            flags.last_voluntary = "CALL"
             return
 
-        if action == "RAISE":
+        if action == "3bet":
+            if state.opener is None:
+                state.opener = actor_pos
+                flags.opened = True
+            elif state.three_bettor is None:
+                state.three_bettor = actor_pos
+                flags.threebet = True
+            flags.last_voluntary = "3BET"
+            return
+
+        if action in {"4bet", "cold_4bet"}:
+            if state.opener is None:
+                state.opener = actor_pos
+                flags.opened = True
+            elif state.three_bettor is None:
+                state.three_bettor = actor_pos
+                flags.threebet = True
+            state.four_bettor = actor_pos
+            flags.last_voluntary = action.upper()
+            return
+
+        if action == "5bet_jam":
             if state.opener is None:
                 state.opener = actor_pos
                 flags.opened = True
@@ -354,60 +420,96 @@ class EngineBridge:
                 flags.threebet = True
             elif state.four_bettor is None:
                 state.four_bettor = actor_pos
-            flags.last_voluntary = action
+            flags.last_voluntary = "5BET_JAM"
             return
 
-    def _map_action_for_spot(self, spot: SpotDescription, action_name: str) -> Optional[str]:
-        action = str(action_name or "").upper()
-        if action == "FOLD":
+        if legacy == "LIMP":
+            if actor_pos not in state.limpers and state.opener is None:
+                state.limpers.append(actor_pos)
+            flags.limped = True
+            flags.last_voluntary = legacy
+            return
+
+        if legacy == "OPEN":
+            if state.opener is None:
+                state.opener = actor_pos
+            flags.opened = True
+            flags.last_voluntary = legacy
+            return
+
+        if legacy == "CALL":
+            if state.opener is not None and state.three_bettor is None and actor_pos not in state.callers_after_open:
+                state.callers_after_open.append(actor_pos)
+            flags.last_voluntary = legacy
+            return
+
+        if legacy == "RAISE":
+            if state.opener is None:
+                state.opener = actor_pos
+                flags.opened = True
+            elif state.three_bettor is None:
+                state.three_bettor = actor_pos
+                flags.threebet = True
+            elif state.four_bettor is None:
+                state.four_bettor = actor_pos
+            flags.last_voluntary = legacy
+            return
+
+    def _map_action_for_spot(self, spot: SpotDescription, action_payload: Dict[str, Any]) -> Optional[str]:
+        payload = self._normalized_preflop_action(action_payload)
+        semantic = str(payload.get("semantic_action") or "").strip().lower()
+        legacy = str(payload.get("action") or "").upper()
+        if semantic in {"", "raise"}:
+            semantic = self._legacy_action_to_semantic(legacy)
+        if semantic == "fold" or legacy == "FOLD":
             return None
 
         if spot.node_type == "unopened":
-            if action == "LIMP":
+            if semantic == "limp":
                 return "limp"
-            if action in {"OPEN", "RAISE"}:
+            if semantic in {"open_raise", "iso_raise", "raise"}:
                 return "raise"
             return None
 
         if spot.node_type in {"facing_limp", "bb_vs_sb_limp"}:
-            if action in {"OPEN", "RAISE"}:
+            if semantic in {"open_raise", "iso_raise", "raise"}:
                 return "iso_raise" if spot.node_type == "facing_limp" else "raise"
-            if action == "CALL":
+            if semantic == "call":
                 return "call"
             return None
 
         if spot.node_type == "limper_vs_iso":
-            if action == "RAISE":
+            if semantic in {"3bet", "4bet", "cold_4bet", "5bet_jam", "raise"}:
                 return "3bet"
-            if action == "CALL":
+            if semantic == "call":
                 return "call"
             return None
 
         if spot.node_type in {"facing_open", "facing_open_callers"}:
-            if action == "RAISE":
+            if semantic in {"3bet", "4bet", "cold_4bet", "5bet_jam", "raise"}:
                 return "3bet"
-            if action == "CALL":
+            if semantic == "call":
                 return "call"
             return None
 
         if spot.node_type == "opener_vs_3bet":
-            if action == "RAISE":
+            if semantic in {"4bet", "cold_4bet", "5bet_jam", "raise"}:
                 return "4bet"
-            if action == "CALL":
+            if semantic == "call":
                 return "call"
             return None
 
         if spot.node_type == "threebettor_vs_4bet":
-            if action == "RAISE":
+            if semantic in {"5bet_jam", "raise"}:
                 return "5bet_jam"
-            if action == "CALL":
+            if semantic == "call":
                 return "call"
             return None
 
         if spot.node_type == "cold_4bet":
-            if action == "RAISE":
+            if semantic in {"4bet", "cold_4bet", "raise"}:
                 return "4bet"
-            if action == "CALL":
+            if semantic == "call":
                 return "call"
             return None
 
@@ -422,7 +524,7 @@ class EngineBridge:
             actor_pos = self._preflop_pos(str(action.get("position", "")), int(hand.player_count))
             if actor_pos == hero_pos:
                 hero_spot = self._infer_actor_spot_before_action(state, actor_pos)
-            self._apply_preflop_action(state, actor_pos, str(action.get("action", "")))
+            self._apply_preflop_action(state, actor_pos, action)
 
         flags = state.flags(hero_pos)
         if flags.last_voluntary is None:
@@ -443,7 +545,7 @@ class EngineBridge:
             actor_raw_pos = str(action.get("position", ""))
             actor_pos = self._preflop_pos(actor_raw_pos, int(hand.player_count))
             spot = self._infer_actor_spot_before_action(state, actor_pos)
-            mapped_action = self._map_action_for_spot(spot, str(action.get("action", ""))) if spot is not None else None
+            mapped_action = self._map_action_for_spot(spot, action) if spot is not None else None
 
             if actor_pos != hero_pos and spot is not None and mapped_action is not None:
                 villain_spots[actor_pos] = {
@@ -459,7 +561,7 @@ class EngineBridge:
                     "range_owner": "opponent",
                 }
 
-            self._apply_preflop_action(state, actor_pos, str(action.get("action", "")))
+            self._apply_preflop_action(state, actor_pos, action)
 
         active_non_fold = [
             pos for pos in self._ordered_positions(hand)
