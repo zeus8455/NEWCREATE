@@ -146,10 +146,30 @@ def _current_preflop_contributions(analysis) -> Tuple[Dict[str, float], Dict[str
     return final_street, forced, visible
 
 
+
+
+def _normalized_hero_cards_from_hand(previous_hand) -> tuple[str, ...]:
+    if not previous_hand:
+        return tuple()
+    return tuple(sorted(str(card) for card in getattr(previous_hand, "hero_cards", []) or []))
+
+
+def _normalized_hero_cards_from_analysis(analysis) -> tuple[str, ...]:
+    return tuple(sorted(str(card) for card in getattr(analysis, "hero_cards", []) or []))
+
+
+def _can_reuse_previous_action_state(previous_hand, analysis, street: str) -> bool:
+    if not previous_hand:
+        return False
+    previous_action_state = dict(getattr(previous_hand, "action_state", {}) or {})
+    if not _can_reuse_previous_action_state(previous_hand, analysis, street):
+        return False
+    return _normalized_hero_cards_from_hand(previous_hand) == _normalized_hero_cards_from_analysis(analysis)
+
 def _initial_preflop_state(previous_hand, analysis, actor_order: List[str]) -> dict:
     current_contribs, forced, visible = _current_preflop_contributions(analysis)
     occupied = list(getattr(analysis, "occupied_positions", []) or [])
-    if previous_hand and dict(getattr(previous_hand, "action_state", {}) or {}).get("street") == "preflop":
+    if _can_reuse_previous_action_state(previous_hand, analysis, "preflop"):
         previous_action_state = dict(previous_hand.action_state or {})
         state = {
             "street_commitments": {str(k): _safe_float(v) for k, v in dict(previous_action_state.get("street_commitments", {}) or {}).items()},
@@ -444,7 +464,7 @@ def _infer_preflop_actions(previous_hand, analysis, settings) -> dict:
 def _infer_non_preflop_actions(previous_hand, analysis, settings) -> dict:
     street = analysis.street
     previous_action_state = dict(previous_hand.action_state) if previous_hand else {}
-    if previous_action_state.get("street") != street:
+    if not _can_reuse_previous_action_state(previous_hand, analysis, street):
         street_commitments: Dict[str, float] = {}
         current_highest = 0.0
         acted_positions: List[str] = []
