@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from math import hypot
-from typing import Optional
+from typing import Optional, Iterable
 
 from .models import FrameAnalysis, HandError, HandState, utc_now_iso
 
@@ -67,8 +67,74 @@ class HandStateManager:
     def _normalized_hero_cards(self, cards: list[str]) -> tuple[str, ...]:
         return tuple(sorted(str(card) for card in cards))
 
+    def _action_signature(self, action: dict) -> tuple:
+        payload = dict(action or {})
+        return (
+            str(payload.get("position") or ""),
+            str(payload.get("street") or ""),
+            str(payload.get("action") or ""),
+            str(payload.get("semantic_action") or ""),
+            str(payload.get("engine_action") or ""),
+            payload.get("amount_bb"),
+            payload.get("final_contribution_bb"),
+            payload.get("current_price_to_call_before"),
+            payload.get("current_price_to_call_after"),
+            payload.get("raise_level_before_action"),
+            payload.get("raise_level_after_action"),
+            str(payload.get("opener_pos") or ""),
+            str(payload.get("three_bettor_pos") or ""),
+            str(payload.get("four_bettor_pos") or ""),
+            payload.get("limpers"),
+            payload.get("callers_after_open"),
+            str(payload.get("call_vs") or ""),
+            str(payload.get("spot_family") or ""),
+            str(payload.get("open_family") or ""),
+            str(payload.get("limp_family") or ""),
+            bool(payload.get("legacy_from_forced_blind", False)),
+        )
+
+    def _dedupe_actions(self, actions: Iterable[dict]) -> list[dict]:
+        seen: set[tuple] = set()
+        deduped: list[dict] = []
+        for action in actions or []:
+            sig = self._action_signature(action)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            deduped.append(dict(action))
+        return deduped
+
+    def _prepare_action_payloads_for_storage(self, hand: Optional[HandState], analysis: FrameAnalysis) -> tuple[list[dict], list[dict]]:
+        incoming_state = dict(getattr(analysis, "action_inference", {}) or {})
+        incoming_actions = [dict(item) for item in list(incoming_state.get("actions_this_frame", []) or [])]
+        incoming_history = [dict(item) for item in list(incoming_state.get("action_history", []) or [])]
+
+        existing_actions = []
+        existing_history = []
+        if hand is not None:
+            existing_actions = [dict(item) for item in list(getattr(hand, "actions_log", []) or [])]
+            existing_state = dict(getattr(hand, "action_state", {}) or {})
+            existing_history = [dict(item) for item in list(existing_state.get("action_history", []) or [])]
+
+        existing_signatures = {self._action_signature(item) for item in [*existing_actions, *existing_history]}
+        novel_actions: list[dict] = []
+        for action in incoming_actions:
+            sig = self._action_signature(action)
+            if sig in existing_signatures:
+                continue
+            existing_signatures.add(sig)
+            novel_actions.append(dict(action))
+
+        merged_history = self._dedupe_actions([*existing_history, *incoming_history, *novel_actions])
+        analysis.action_inference["actions_this_frame"] = [dict(item) for item in novel_actions]
+        analysis.action_inference["action_history"] = [dict(item) for item in merged_history]
+        return novel_actions, merged_history
+
     def create_hand(self, analysis: FrameAnalysis) -> HandState:
         now = analysis.timestamp
+        novel_actions, merged_history = self._prepare_action_payloads_for_storage(None, analysis)
+        analysis.action_inference["action_history"] = [dict(item) for item in merged_history]
+        analysis.action_inference["actions_this_frame"] = [dict(item) for item in novel_actions]
         hand = HandState(
             schema_version=self.schema_version,
             hand_id=self._next_hand_id(),
@@ -98,7 +164,7 @@ class HandStateManager:
             table_amount_state=dict(analysis.table_amount_state),
             amount_normalization=dict(analysis.amount_normalization),
             action_state=dict(analysis.action_inference),
-            actions_log=list(analysis.action_inference.get("actions_this_frame", [])),
+            actions_log=list(novel_actions),
         )
         self._append_frame_log(hand, analysis, matched_existing=False, processing_status="ok")
         hand.processing_summary["frames_seen_for_this_hand"] += 1
@@ -190,6 +256,9 @@ class HandStateManager:
 
     def _update_hand(self, hand: HandState, analysis: FrameAnalysis) -> None:
         hand.status = "active"
+        novel_actions, merged_history = self._prepare_action_payloads_for_storage(hand, analysis)
+        analysis.action_inference["action_history"] = [dict(item) for item in merged_history]
+        analysis.action_inference["actions_this_frame"] = [dict(item) for item in novel_actions]
         hand.conflict_state = None
         hand.updated_at = analysis.timestamp
         hand.last_seen_at = analysis.timestamp
@@ -202,7 +271,7 @@ class HandStateManager:
         hand.table_amount_state = dict(analysis.table_amount_state)
         hand.amount_normalization = dict(analysis.amount_normalization)
         hand.action_state = dict(analysis.action_inference)
-        hand.actions_log.extend(list(analysis.action_inference.get("actions_this_frame", [])))
+        hand.actions_log = self._dedupe_actions([*list(hand.actions_log), *list(novel_actions)])
         hand.board_cards = list(analysis.board_cards) if analysis.board_cards else hand.board_cards
         hand.player_states = {position: dict(payload) for position, payload in analysis.player_states.items()}
         if analysis.street != hand.street_state.get("current_street"):
