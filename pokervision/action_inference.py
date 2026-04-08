@@ -1,7 +1,6 @@
-
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 CANONICAL_RING = {
     2: ["BTN", "BB"],
@@ -22,7 +21,7 @@ PREFLOP_ORDER = {
 EPS = 1e-9
 
 
-def _safe_float(value, default: float = 0.0) -> float:
+def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
             return default
@@ -35,8 +34,34 @@ def _approx_eq(a: float, b: float, eps: float = EPS) -> bool:
     return abs(a - b) <= eps
 
 
+def _engine_action_for(semantic_action: str) -> str:
+    if semantic_action in {"limp", "call"}:
+        return "call"
+    if semantic_action == "check":
+        return "check"
+    return "raise"
+
+
 def _player_is_folded(player_states: Dict[str, Dict[str, object]], position: str) -> bool:
     return bool((player_states or {}).get(position, {}).get("is_fold", False))
+
+
+def _forced_preflop_blinds(player_count: int, occupied_positions: Iterable[str]) -> Dict[str, float]:
+    positions = set(occupied_positions)
+    if player_count == 2 or ({"BTN", "BB"} <= positions and "SB" not in positions):
+        forced: Dict[str, float] = {}
+        if "BTN" in positions:
+            forced["BTN"] = 0.5
+        if "BB" in positions:
+            forced["BB"] = 1.0
+        return forced
+
+    forced = {}
+    if "SB" in positions:
+        forced["SB"] = 0.5
+    if "BB" in positions:
+        forced["BB"] = 1.0
+    return forced
 
 
 def get_street_actor_order(
@@ -49,15 +74,15 @@ def get_street_actor_order(
     ring = [pos for pos in CANONICAL_RING.get(player_count, []) if pos in occupied_positions]
     if not ring:
         return []
+
     if street == "preflop":
         ordered = [pos for pos in PREFLOP_ORDER.get(player_count, ring) if pos in ring]
-        # Preflop reconstruction must keep folded positions that still have money
-        # on the table, otherwise open/call/3bet lines collapse after later folds.
         return [
-            pos for pos in ordered
-            if (not _player_is_folded(player_states, pos))
-            or _safe_float((contributions or {}).get(pos), 0.0) > EPS
+            pos
+            for pos in ordered
+            if (not _player_is_folded(player_states, pos)) or _safe_float((contributions or {}).get(pos), 0.0) > EPS
         ]
+
     after_btn_preference = ["SB", "BB", "UTG", "MP", "CO", "BTN"]
     start_pos = next((pos for pos in after_btn_preference if pos in ring), ring[0])
     start_idx = ring.index(start_pos)
@@ -65,420 +90,298 @@ def get_street_actor_order(
     return [pos for pos in ordered if not _player_is_folded(player_states, pos)]
 
 
-def _legacy_action_name_from_semantic(semantic_action: str) -> str:
-    mapping = {
-        "limp": "LIMP",
-        "open_raise": "OPEN",
-        "iso_raise": "RAISE",
-        "call": "CALL",
-        "check": "CHECK",
-        "3bet": "RAISE",
-        "4bet": "RAISE",
-        "cold_4bet": "RAISE",
-        "5bet_jam": "RAISE",
-        "bet": "BET",
-        "raise": "RAISE",
-    }
-    return mapping.get(semantic_action, semantic_action.upper())
-
-
-def _engine_action_from_semantic(semantic_action: str) -> str:
-    if semantic_action in {"limp", "call"}:
-        return "call"
-    if semantic_action == "check":
-        return "check"
-    return "raise"
-
-
-def _display_action(semantic_action: str, amount: Optional[float]) -> str:
-    label_map = {
-        "limp": "LIMP",
-        "open_raise": "OPEN",
-        "iso_raise": "ISO",
-        "call": "CALL",
-        "check": "CHECK",
-        "3bet": "3BET",
-        "4bet": "4BET",
-        "cold_4bet": "COLD 4BET",
-        "5bet_jam": "5BET JAM",
-        "bet": "BET",
-        "raise": "RAISE",
-    }
-    label = label_map.get(semantic_action, semantic_action.upper())
-    if amount is None or semantic_action == "check":
-        return label
-    return f"{label} {amount:.1f}"
-
-
-def _current_preflop_contributions(analysis) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
-    amount_norm = dict(getattr(analysis, "amount_normalization", {}) or {})
-    final_street = {
-        str(pos): _safe_float(value)
-        for pos, value in dict(amount_norm.get("final_contribution_street_bb_by_pos", {}) or {}).items()
-    }
-    forced = {
-        str(pos): _safe_float(value)
-        for pos, value in dict(amount_norm.get("forced_blinds_by_position", {}) or {}).items()
-    }
-    visible = {
-        str(pos): _safe_float(value)
-        for pos, value in dict(amount_norm.get("visible_bets_by_position", {}) or {}).items()
-    }
-    if not final_street:
-        table_amount_state = dict(getattr(analysis, "table_amount_state", {}) or {})
-        bets = dict(table_amount_state.get("bets_by_position", {}) or {})
-        for pos in getattr(analysis, "occupied_positions", []) or []:
-            if pos in bets and bets[pos].get("amount_bb") is not None:
-                final_street[pos] = _safe_float(bets[pos].get("amount_bb"))
-            else:
-                final_street[pos] = 0.0
-        if getattr(analysis, "street", "") == "preflop":
-            blinds = dict(table_amount_state.get("posted_blinds", {}) or {})
-            sb_payload = blinds.get("SB") or {}
-            bb_payload = blinds.get("BB") or {}
-            if int(getattr(analysis, "player_count", 0) or 0) == 2:
-                if "BTN" in getattr(analysis, "occupied_positions", []):
-                    forced["BTN"] = _safe_float(sb_payload.get("amount_bb"), 0.5) or 0.5
-                if "BB" in getattr(analysis, "occupied_positions", []):
-                    forced["BB"] = _safe_float(bb_payload.get("amount_bb"), 1.0) or 1.0
-            else:
-                if "SB" in getattr(analysis, "occupied_positions", []):
-                    forced["SB"] = _safe_float(sb_payload.get("amount_bb"), 0.5) or 0.5
-                if "BB" in getattr(analysis, "occupied_positions", []):
-                    forced["BB"] = _safe_float(bb_payload.get("amount_bb"), 1.0) or 1.0
-            for pos, amount in forced.items():
-                final_street[pos] = max(final_street.get(pos, 0.0), amount)
-            for pos in getattr(analysis, "occupied_positions", []) or []:
-                visible[pos] = max(0.0, final_street.get(pos, 0.0) - forced.get(pos, 0.0))
-    return final_street, forced, visible
-
-
-
-
-def _normalized_hero_cards_from_hand(previous_hand) -> tuple[str, ...]:
-    if not previous_hand:
-        return tuple()
-    return tuple(sorted(str(card) for card in getattr(previous_hand, "hero_cards", []) or []))
-
-
-def _normalized_hero_cards_from_analysis(analysis) -> tuple[str, ...]:
-    return tuple(sorted(str(card) for card in getattr(analysis, "hero_cards", []) or []))
-
-
-def _can_reuse_previous_action_state(previous_hand, analysis, street: str) -> bool:
-    if not previous_hand:
-        return False
-    previous_action_state = dict(getattr(previous_hand, "action_state", {}) or {})
-    if previous_action_state.get("street") != street:
-        return False
-    return _normalized_hero_cards_from_hand(previous_hand) == _normalized_hero_cards_from_analysis(analysis)
-
-def _initial_preflop_state(previous_hand, analysis, actor_order: List[str]) -> dict:
-    current_contribs, forced, visible = _current_preflop_contributions(analysis)
-    occupied = list(getattr(analysis, "occupied_positions", []) or [])
-    if _can_reuse_previous_action_state(previous_hand, analysis, "preflop"):
-        previous_action_state = dict(previous_hand.action_state or {})
-        state = {
-            "street_commitments": {str(k): _safe_float(v) for k, v in dict(previous_action_state.get("street_commitments", {}) or {}).items()},
-            "current_price_to_call": _safe_float(previous_action_state.get("current_price_to_call"), 1.0),
-            "raise_level": int(previous_action_state.get("raise_level", 0) or 0),
-            "limpers": list(previous_action_state.get("limpers", []) or []),
-            "opener_pos": previous_action_state.get("opener_pos"),
-            "three_bettor_pos": previous_action_state.get("three_bettor_pos"),
-            "four_bettor_pos": previous_action_state.get("four_bettor_pos"),
-            "callers_after_open": list(previous_action_state.get("callers_after_open", []) or []),
-            "acted_positions": list(previous_action_state.get("acted_positions", []) or []),
-            "last_actions_by_position": dict(previous_action_state.get("last_actions_by_position", {}) or {}),
-            "last_aggressor_position": previous_action_state.get("last_aggressor_position"),
-            "action_history": list(previous_action_state.get("action_history", []) or []),
-        }
-        for pos in occupied:
-            state["street_commitments"].setdefault(pos, forced.get(pos, 0.0 if pos != "BB" else forced.get("BB", 0.0)))
-        return state | {"current_contribs": current_contribs, "forced": forced, "visible": visible}
-    base_commitments = {pos: _safe_float(forced.get(pos)) for pos in occupied}
-    state = {
-        "street_commitments": base_commitments,
-        "current_price_to_call": 1.0 if int(getattr(analysis, "player_count", 0) or 0) >= 2 else 0.0,
-        "raise_level": 0,
-        "limpers": [],
-        "opener_pos": None,
-        "three_bettor_pos": None,
-        "four_bettor_pos": None,
-        "callers_after_open": [],
-        "acted_positions": [],
-        "last_actions_by_position": {},
-        "last_aggressor_position": None,
-        "action_history": [],
-    }
-    return state | {"current_contribs": current_contribs, "forced": forced, "visible": visible}
-
-
-def _build_preflop_action_record(
+def _derive_node_type_preview(
     *,
-    analysis,
-    position: str,
-    semantic_action: str,
-    final_contribution_bb: float,
-    current_price_to_call_before: float,
-    current_price_to_call_after: float,
-    raise_level_before: int,
-    raise_level_after: int,
+    hero_position: Optional[str],
+    player_count: int,
+    limpers: list[str],
     opener_pos: Optional[str],
     three_bettor_pos: Optional[str],
     four_bettor_pos: Optional[str],
-    limpers: List[str],
-    callers_after_open: List[str],
-    call_vs: Optional[str] = None,
-    spot_family: Optional[str] = None,
-    open_family: Optional[str] = None,
-    limp_family: Optional[str] = None,
-) -> dict:
-    action_name = _legacy_action_name_from_semantic(semantic_action)
-    payload = {
+    callers_after_open: int,
+    action_history: list[dict],
+) -> Optional[str]:
+    hero_pos = str(hero_position or "")
+    if not hero_pos:
+        return None
+
+    if player_count == 2 and limpers and limpers[0] == "BTN" and hero_pos == "BB" and not opener_pos:
+        return "bb_vs_sb_limp"
+
+    if four_bettor_pos:
+        if hero_pos == three_bettor_pos:
+            return "threebettor_vs_4bet"
+        if hero_pos == four_bettor_pos and hero_pos not in {opener_pos, three_bettor_pos}:
+            return "cold_4bet"
+
+    if three_bettor_pos:
+        if hero_pos == opener_pos:
+            return "opener_vs_3bet"
+        if opener_pos and hero_pos not in {opener_pos, three_bettor_pos}:
+            return "facing_3bet"
+
+    if opener_pos:
+        if limpers and hero_pos in limpers:
+            return "limper_vs_iso"
+        if callers_after_open > 0:
+            return "facing_open_callers"
+        if hero_pos != opener_pos:
+            return "facing_open"
+        return "open_raise"
+
+    limp_actions = [step for step in action_history if step.get("semantic_action") == "limp"]
+    if limp_actions:
+        if len(limp_actions) == 1:
+            return "open_limp_first_in"
+        return "over_limp_after_1_limper" if len(limp_actions) == 2 else "over_limp_after_2plus_limpers"
+
+    return "unopened"
+
+
+def _build_action_step(
+    *,
+    order: int,
+    position: str,
+    street: str,
+    final_contribution_bb: float,
+    semantic_action: str,
+    current_price_to_call: float,
+    raise_level: int,
+    frame_id: Optional[str],
+    timestamp: Optional[str],
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "order": order,
         "position": position,
-        "street": "preflop",
-        "action": action_name,
+        "pos": position,
+        "street": street,
+        "final_contribution_bb": round(final_contribution_bb, 4),
+        "amount_bb": round(final_contribution_bb, 4),
         "semantic_action": semantic_action,
-        "engine_action": _engine_action_from_semantic(semantic_action),
-        "amount_bb": final_contribution_bb,
-        "final_contribution_bb": final_contribution_bb,
-        "current_price_to_call_before": current_price_to_call_before,
-        "current_price_to_call_after": current_price_to_call_after,
-        "raise_level_before_action": raise_level_before,
-        "raise_level_after_action": raise_level_after,
-        "frame_id": analysis.frame_id,
-        "timestamp": analysis.timestamp,
-        "opener_pos": opener_pos,
-        "three_bettor_pos": three_bettor_pos,
-        "four_bettor_pos": four_bettor_pos,
-        "limpers": len(limpers),
-        "callers_after_open": len(callers_after_open),
+        "engine_action": _engine_action_for(semantic_action),
+        "raise_level_after_action": raise_level,
+        "current_price_to_call_after_action": round(current_price_to_call, 4),
+        "frame_id": frame_id,
+        "timestamp": timestamp,
     }
-    if call_vs:
-        payload["call_vs"] = call_vs
-    if spot_family:
-        payload["spot_family"] = spot_family
-    if open_family:
-        payload["open_family"] = open_family
-    if limp_family:
-        payload["limp_family"] = limp_family
+    if extra:
+        payload.update(extra)
     return payload
 
 
-def _infer_preflop_actions(previous_hand, analysis, settings) -> dict:
+def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> Dict[str, Any]:
+    amount_state = getattr(analysis, "amount_state", None) or getattr(analysis, "amount_normalization", None) or {}
+    contributions = {
+        str(pos): _safe_float(amount, 0.0)
+        for pos, amount in (amount_state.get("final_contribution_bb_by_pos") or {}).items()
+    }
+    street_contribs = {
+        str(pos): _safe_float(amount, 0.0)
+        for pos, amount in (amount_state.get("final_contribution_street_bb_by_pos") or {}).items()
+    }
     player_count = int(getattr(analysis, "player_count", 0) or 0)
-    preflop_contribs, preflop_forced, preflop_visible = _current_preflop_contributions(analysis)
+    occupied_positions = list(getattr(analysis, "occupied_positions", []) or [])
+    hero_position = getattr(analysis, "hero_position", None)
+    player_states = dict(getattr(analysis, "player_states", {}) or {})
+    forced = _forced_preflop_blinds(player_count, occupied_positions)
+
     actor_order = get_street_actor_order(
         player_count,
         "preflop",
-        list(getattr(analysis, "occupied_positions", []) or []),
-        getattr(analysis, "player_states", {}) or {},
-        contributions=preflop_contribs,
+        occupied_positions,
+        player_states,
+        contributions=contributions,
     )
-    state = _initial_preflop_state(previous_hand, analysis, actor_order)
-    street_commitments: Dict[str, float] = dict(state["street_commitments"])
-    current_contribs: Dict[str, float] = dict(preflop_contribs or state["current_contribs"])
-    forced: Dict[str, float] = dict(preflop_forced or state["forced"])
-    visible: Dict[str, float] = dict(preflop_visible or state["visible"])
-    current_price_to_call = _safe_float(state["current_price_to_call"], 1.0)
-    raise_level = int(state["raise_level"])
-    limpers: List[str] = list(state["limpers"])
-    opener_pos = state["opener_pos"]
-    three_bettor_pos = state["three_bettor_pos"]
-    four_bettor_pos = state["four_bettor_pos"]
-    callers_after_open: List[str] = list(state["callers_after_open"])
-    acted_positions: List[str] = list(state["acted_positions"])
-    last_actions_by_position: Dict[str, str] = dict(state["last_actions_by_position"])
-    last_aggressor = state["last_aggressor_position"]
-    action_history: List[dict] = list(state["action_history"])
-    previous_player_states = getattr(previous_hand, "player_states", {}) if previous_hand else {}
-    actions: List[dict] = []
+
+    current_price_to_call = 1.0 if "BB" in occupied_positions else 0.0
+    raise_level = 0
+    limpers: List[str] = []
+    opener_pos: Optional[str] = None
+    three_bettor_pos: Optional[str] = None
+    four_bettor_pos: Optional[str] = None
+    callers_after_open = 0
+    action_history: List[Dict[str, Any]] = []
+    last_actions_by_position: Dict[str, str] = {}
+    acted_positions: List[str] = []
+    skipped_positions: List[str] = []
 
     for position in actor_order:
-        player_state = (getattr(analysis, "player_states", {}) or {}).get(position, {}) or {}
-        prev_player_state = (previous_player_states or {}).get(position, {}) or {}
-        prev_fold = bool(prev_player_state.get("is_fold", False))
-        is_fold = bool(player_state.get("is_fold", False))
+        amount = contributions.get(position, 0.0)
+        forced_amount = forced.get(position, 0.0)
+        is_fold = _player_is_folded(player_states, position)
 
-        current_amount = _safe_float(current_contribs.get(position))
-        previous_amount = _safe_float(street_commitments.get(position))
+        if amount < forced_amount:
+            amount = forced_amount
 
-        # On preflop snapshots we may see a folded player whose chips still remain
-        # on the table. In that case we must reconstruct the contribution first and
-        # not let the fold marker erase that historical action.
-        if is_fold and not prev_fold and current_amount <= previous_amount + EPS:
-            action = {
-                "position": position,
-                "street": "preflop",
-                "action": "FOLD",
-                "semantic_action": "fold",
-                "engine_action": "fold",
-                "amount_bb": None,
-                "final_contribution_bb": street_commitments.get(position, 0.0),
-                "frame_id": analysis.frame_id,
-                "timestamp": analysis.timestamp,
-            }
-            actions.append(action)
-            action_history.append(dict(action))
-            last_actions_by_position[position] = "FOLD"
-            if position not in acted_positions:
+        if amount <= forced_amount + EPS:
+            if position == "BB" and raise_level == 0 and limpers and _approx_eq(amount, current_price_to_call):
+                step = _build_action_step(
+                    order=len(action_history) + 1,
+                    position=position,
+                    street="preflop",
+                    final_contribution_bb=amount,
+                    semantic_action="check",
+                    current_price_to_call=current_price_to_call,
+                    raise_level=raise_level,
+                    frame_id=getattr(analysis, "frame_id", None),
+                    timestamp=getattr(analysis, "timestamp", None),
+                    extra={"reason": "bb_closes_action_vs_limp"},
+                )
+                action_history.append(step)
+                last_actions_by_position[position] = "check"
                 acted_positions.append(position)
+            else:
+                skipped_positions.append(position)
             continue
-
-        if current_amount <= previous_amount + EPS:
-            continue
-
-        before_price = current_price_to_call
-        before_level = raise_level
-        semantic_action = ""
-        call_vs = None
-        spot_family = None
-        open_family = None
-        limp_family = None
 
         if raise_level == 0:
-            if _approx_eq(current_amount, 1.0):
+            if _approx_eq(amount, current_price_to_call):
                 semantic_action = "limp"
+                limpers.append(position)
+                extra: Dict[str, Any] = {}
                 if position == "SB":
-                    limp_family = "sb_complete"
-                elif limpers:
-                    limp_family = "over_limp"
+                    extra["limp_subtype"] = "sb_complete"
+                elif position == "BTN" and player_count == 2:
+                    extra["limp_subtype"] = "sb_complete_first_in"
+                elif len(limpers) == 1:
+                    extra["limp_subtype"] = "open_limp"
                 else:
-                    limp_family = "open_limp"
-                if position not in limpers:
-                    limpers.append(position)
-            elif current_amount > 1.0 + EPS:
-                if limpers:
-                    semantic_action = "iso_raise"
-                else:
-                    semantic_action = "open_raise"
-                open_family = "open_raise"
+                    extra["limp_subtype"] = "over_limp"
+            elif amount > current_price_to_call + EPS:
+                semantic_action = "open_raise" if not limpers else "iso_raise"
                 opener_pos = position
                 raise_level = 1
-                current_price_to_call = current_amount
-                last_aggressor = position
-        elif _approx_eq(current_amount, current_price_to_call):
-            semantic_action = "call"
-            if raise_level == 1:
-                call_vs = "open_raise"
-                if position != opener_pos and position not in callers_after_open:
-                    callers_after_open.append(position)
-            elif raise_level == 2:
-                call_vs = "3bet"
-            elif raise_level >= 3:
-                call_vs = "4bet"
-        elif current_amount > current_price_to_call + EPS:
-            if raise_level == 1:
+                current_price_to_call = amount
+                callers_after_open = 0
+                extra = {}
+                if limpers:
+                    extra["open_family"] = "open_raise"
+                    extra["isolates_limpers"] = list(limpers)
+            else:
+                skipped_positions.append(position)
+                continue
+        elif raise_level == 1:
+            if _approx_eq(amount, current_price_to_call):
+                semantic_action = "call"
+                callers_after_open += 1
+                extra = {"call_vs": "open_raise"}
+            elif amount > current_price_to_call + EPS:
                 semantic_action = "3bet"
                 three_bettor_pos = position
                 raise_level = 2
-            elif raise_level == 2:
+                current_price_to_call = amount
+                extra = {}
+            else:
+                skipped_positions.append(position)
+                continue
+        elif raise_level == 2:
+            if _approx_eq(amount, current_price_to_call):
+                semantic_action = "call"
+                extra = {"call_vs": "3bet"}
+            elif amount > current_price_to_call + EPS:
                 semantic_action = "4bet"
                 if position not in {opener_pos, three_bettor_pos}:
-                    spot_family = "cold_4bet"
+                    extra = {"spot_family": "cold_4bet"}
+                else:
+                    extra = {}
                 four_bettor_pos = position
                 raise_level = 3
+                current_price_to_call = amount
             else:
-                semantic_action = "5bet_jam"
-                raise_level = max(raise_level + 1, 4)
-            current_price_to_call = current_amount
-            last_aggressor = position
+                skipped_positions.append(position)
+                continue
         else:
+            if _approx_eq(amount, current_price_to_call):
+                semantic_action = "call"
+                extra = {"call_vs": "4bet"}
+            elif amount > current_price_to_call + EPS:
+                semantic_action = "5bet_jam"
+                raise_level += 1
+                current_price_to_call = amount
+                extra = {}
+            else:
+                skipped_positions.append(position)
+                continue
+
+        if is_fold and amount <= forced_amount + EPS:
+            skipped_positions.append(position)
             continue
 
-        if not semantic_action:
-            continue
-
-        street_commitments[position] = current_amount
-        if position not in acted_positions:
-            acted_positions.append(position)
-        action = _build_preflop_action_record(
-            analysis=analysis,
+        step = _build_action_step(
+            order=len(action_history) + 1,
             position=position,
-            semantic_action=semantic_action if spot_family != "cold_4bet" else "4bet",
-            final_contribution_bb=current_amount,
-            current_price_to_call_before=before_price,
-            current_price_to_call_after=current_price_to_call,
-            raise_level_before=before_level,
-            raise_level_after=raise_level,
-            opener_pos=opener_pos,
-            three_bettor_pos=three_bettor_pos,
-            four_bettor_pos=four_bettor_pos,
-            limpers=limpers,
-            callers_after_open=callers_after_open,
-            call_vs=call_vs,
-            spot_family=spot_family,
-            open_family=open_family,
-            limp_family=limp_family,
+            street="preflop",
+            final_contribution_bb=amount,
+            semantic_action=semantic_action,
+            current_price_to_call=current_price_to_call,
+            raise_level=raise_level,
+            frame_id=getattr(analysis, "frame_id", None),
+            timestamp=getattr(analysis, "timestamp", None),
+            extra=extra,
         )
-        # Preserve distinct spot family while keeping canonical semantic action.
-        if semantic_action == "5bet_jam":
-            action["is_all_in_like"] = True
-        action["legacy_from_forced_blind"] = _approx_eq(current_amount, forced.get(position, -999.0)) and _approx_eq(current_amount, previous_amount)
-        actions.append(action)
-        action_history.append(dict(action))
-        display_semantic = semantic_action if spot_family != "cold_4bet" else "cold_4bet"
-        last_actions_by_position[position] = _display_action(display_semantic, current_amount)
+        action_history.append(step)
+        last_actions_by_position[position] = semantic_action
+        acted_positions.append(position)
 
-    # Conservative optional check inference for completed blind-vs-limp spots only.
-    allow_check = bool(getattr(settings, "infer_checks_without_explicit_evidence", False))
-    if allow_check and raise_level == 0 and "BB" in actor_order and "BB" not in acted_positions and limpers:
-        bb_current = _safe_float(current_contribs.get("BB"))
-        bb_prev = _safe_float(street_commitments.get("BB"))
-        if _approx_eq(bb_current, 1.0) and _approx_eq(bb_prev, 1.0):
-            action = _build_preflop_action_record(
-                analysis=analysis,
-                position="BB",
-                semantic_action="check",
-                final_contribution_bb=bb_current,
-                current_price_to_call_before=current_price_to_call,
-                current_price_to_call_after=current_price_to_call,
-                raise_level_before=raise_level,
-                raise_level_after=raise_level,
-                opener_pos=opener_pos,
-                three_bettor_pos=three_bettor_pos,
-                four_bettor_pos=four_bettor_pos,
-                limpers=limpers,
-                callers_after_open=callers_after_open,
-            )
-            actions.append(action)
-            action_history.append(dict(action))
-            last_actions_by_position["BB"] = "CHECK"
-            acted_positions.append("BB")
-
-    # Ensure all occupied positions exist in commitments
-    for pos in getattr(analysis, "occupied_positions", []) or []:
-        street_commitments[pos] = _safe_float(current_contribs.get(pos, street_commitments.get(pos, 0.0)))
+    node_type_preview = _derive_node_type_preview(
+        hero_position=hero_position,
+        player_count=player_count,
+        limpers=limpers,
+        opener_pos=opener_pos,
+        three_bettor_pos=three_bettor_pos,
+        four_bettor_pos=four_bettor_pos,
+        callers_after_open=callers_after_open,
+        action_history=action_history,
+    )
 
     return {
         "street": "preflop",
+        "source_mode": amount_state.get("source_mode", "forced_blinds_plus_visible_chips"),
         "actor_order": actor_order,
-        "street_commitments": street_commitments,
-        "current_highest_commitment": current_price_to_call,
-        "current_price_to_call": current_price_to_call,
-        "raise_level": raise_level,
-        "limpers": limpers,
+        "street_commitments": {pos: round(contributions.get(pos, 0.0), 4) for pos in actor_order},
+        "current_highest_commitment": round(current_price_to_call, 4),
+        "last_aggressor_position": four_bettor_pos or three_bettor_pos or opener_pos,
+        "acted_positions": list(acted_positions),
+        "last_actions_by_position": dict(last_actions_by_position),
+        "actions_this_frame": list(action_history),
+        "action_history": list(action_history),
+        "final_contribution_bb_by_pos": {
+            pos: round(value, 4) for pos, value in contributions.items()
+        },
+        "final_contribution_street_bb_by_pos": {
+            pos: round(value, 4) for pos, value in street_contribs.items()
+        },
+        "semantic_action": action_history[-1]["semantic_action"] if action_history else None,
+        "engine_action": action_history[-1]["engine_action"] if action_history else None,
+        "raise_level_after_action": action_history[-1]["raise_level_after_action"] if action_history else 0,
+        "current_price_to_call_after_action": action_history[-1]["current_price_to_call_after_action"] if action_history else round(current_price_to_call, 4),
+        "limpers": list(limpers),
+        "limpers_count": len(limpers),
         "opener_pos": opener_pos,
         "three_bettor_pos": three_bettor_pos,
         "four_bettor_pos": four_bettor_pos,
         "callers_after_open": callers_after_open,
-        "last_aggressor_position": last_aggressor,
-        "acted_positions": acted_positions,
-        "last_actions_by_position": last_actions_by_position,
-        "actions_this_frame": actions,
-        "action_history": action_history,
-        "final_contribution_bb_by_pos": dict(current_contribs),
-        "final_contribution_street_bb_by_pos": dict(current_contribs),
-        "forced_blinds_by_position": dict(forced),
-        "visible_bets_by_position": dict(visible),
-        "amount_normalization": dict(getattr(analysis, "amount_normalization", {}) or {}),
+        "callers": callers_after_open,
+        "node_type_preview": node_type_preview,
+        "hero_position": hero_position,
+        "hero_context_preview": {
+            "hero_pos": hero_position,
+            "node_type": node_type_preview,
+            "opener_pos": opener_pos,
+            "three_bettor_pos": three_bettor_pos,
+            "four_bettor_pos": four_bettor_pos,
+            "limpers": len(limpers),
+            "callers": callers_after_open,
+        },
+        "skipped_positions": skipped_positions,
     }
 
 
-def _infer_non_preflop_actions(previous_hand, analysis, settings) -> dict:
-    street = analysis.street
-    previous_action_state = dict(previous_hand.action_state) if previous_hand else {}
-    if not _can_reuse_previous_action_state(previous_hand, analysis, street):
+def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> Dict[str, Any]:
+    street = getattr(analysis, "street", "preflop")
+    previous_action_state = dict(getattr(previous_hand, "action_state", {}) or {}) if previous_hand else {}
+    if previous_action_state.get("street") != street:
         street_commitments: Dict[str, float] = {}
         current_highest = 0.0
         acted_positions: List[str] = []
@@ -491,68 +394,72 @@ def _infer_non_preflop_actions(previous_hand, analysis, settings) -> dict:
         last_aggressor = previous_action_state.get("last_aggressor_position")
         last_actions_by_position = dict(previous_action_state.get("last_actions_by_position", {}))
 
+    amount_state = getattr(analysis, "amount_state", None) or getattr(analysis, "amount_normalization", None) or {}
+    current_bets = {
+        str(pos): _safe_float(amount, 0.0)
+        for pos, amount in (amount_state.get("final_contribution_street_bb_by_pos") or {}).items()
+    }
+    if not current_bets:
+        current_bets = {
+            pos: _safe_float(payload.get("amount_bb"), 0.0)
+            for pos, payload in (getattr(analysis, "table_amount_state", {}) or {}).get("bets_by_position", {}).items()
+            if isinstance(payload, dict) and payload.get("amount_bb") is not None
+        }
+
     actions: List[dict] = []
     actor_order = get_street_actor_order(
-        int(analysis.player_count or 0),
+        int(getattr(analysis, "player_count", 0) or 0),
         street,
-        list(analysis.occupied_positions),
-        analysis.player_states,
+        list(getattr(analysis, "occupied_positions", []) or []),
+        dict(getattr(analysis, "player_states", {}) or {}),
+        contributions=current_bets,
     )
-    current_bets = {
-        pos: float(payload.get("amount_bb"))
-        for pos, payload in (analysis.table_amount_state or {}).get("bets_by_position", {}).items()
-        if payload.get("amount_bb") is not None
-    }
-    previous_player_states = previous_hand.player_states if previous_hand else {}
+    previous_player_states = getattr(previous_hand, "player_states", {}) if previous_hand else {}
     any_positive_bets = any(amount > 0 for amount in current_bets.values())
     allow_check_inference = bool(getattr(settings, "infer_checks_without_explicit_evidence", False))
 
     for position in actor_order:
-        player_state = analysis.player_states.get(position, {})
-        prev_player_state = previous_player_states.get(position, {})
+        player_state = dict((getattr(analysis, "player_states", {}) or {}).get(position, {}))
+        prev_player_state = dict((previous_player_states or {}).get(position, {}))
         prev_fold = bool(prev_player_state.get("is_fold", False))
         is_fold = bool(player_state.get("is_fold", False))
-
         if is_fold and not prev_fold:
             action = {
                 "position": position,
+                "pos": position,
                 "street": street,
-                "action": "FOLD",
                 "semantic_action": "fold",
                 "engine_action": "fold",
                 "amount_bb": None,
-                "final_contribution_bb": street_commitments.get(position, 0.0),
-                "frame_id": analysis.frame_id,
-                "timestamp": analysis.timestamp,
+                "frame_id": getattr(analysis, "frame_id", None),
+                "timestamp": getattr(analysis, "timestamp", None),
             }
             actions.append(action)
-            last_actions_by_position[position] = "FOLD"
+            last_actions_by_position[position] = "fold"
             if position not in acted_positions:
                 acted_positions.append(position)
             continue
 
         current_amount = current_bets.get(position, 0.0)
         previous_amount = street_commitments.get(position, 0.0)
-
         if current_amount > previous_amount + EPS:
             if current_highest <= 0.0:
                 semantic_action = "bet"
             else:
                 semantic_action = "call" if _approx_eq(current_amount, current_highest) else "raise"
-            action_name = _legacy_action_name_from_semantic(semantic_action)
             action = {
                 "position": position,
+                "pos": position,
                 "street": street,
-                "action": action_name,
                 "semantic_action": semantic_action,
-                "engine_action": _engine_action_from_semantic(semantic_action),
-                "amount_bb": current_amount,
-                "final_contribution_bb": current_amount,
-                "frame_id": analysis.frame_id,
-                "timestamp": analysis.timestamp,
+                "engine_action": "call" if semantic_action == "call" else "raise",
+                "amount_bb": round(current_amount, 4),
+                "final_contribution_street_bb": round(current_amount, 4),
+                "frame_id": getattr(analysis, "frame_id", None),
+                "timestamp": getattr(analysis, "timestamp", None),
             }
             actions.append(action)
-            last_actions_by_position[position] = _display_action(semantic_action, current_amount)
+            last_actions_by_position[position] = semantic_action
             street_commitments[position] = current_amount
             if semantic_action in {"bet", "raise"}:
                 current_highest = max(current_highest, current_amount)
@@ -570,34 +477,49 @@ def _infer_non_preflop_actions(previous_hand, analysis, settings) -> dict:
         ):
             action = {
                 "position": position,
+                "pos": position,
                 "street": street,
-                "action": "CHECK",
                 "semantic_action": "check",
                 "engine_action": "check",
                 "amount_bb": 0.0,
-                "final_contribution_bb": 0.0,
-                "frame_id": analysis.frame_id,
-                "timestamp": analysis.timestamp,
+                "frame_id": getattr(analysis, "frame_id", None),
+                "timestamp": getattr(analysis, "timestamp", None),
             }
             actions.append(action)
-            last_actions_by_position[position] = "CHECK"
+            last_actions_by_position[position] = "check"
             acted_positions.append(position)
 
+    last_action = actions[-1] if actions else {}
     return {
         "street": street,
         "actor_order": actor_order,
-        "street_commitments": street_commitments,
-        "current_highest_commitment": current_highest,
+        "street_commitments": {k: round(v, 4) for k, v in street_commitments.items()},
+        "current_highest_commitment": round(current_highest, 4),
         "last_aggressor_position": last_aggressor,
-        "acted_positions": acted_positions,
-        "last_actions_by_position": last_actions_by_position,
-        "actions_this_frame": actions,
-        "amount_normalization": dict(getattr(analysis, "amount_normalization", {}) or {}),
+        "acted_positions": list(acted_positions),
+        "last_actions_by_position": dict(last_actions_by_position),
+        "actions_this_frame": list(actions),
+        "action_history": list(actions),
+        "final_contribution_bb_by_pos": {
+            str(pos): round(_safe_float(amount, 0.0), 4)
+            for pos, amount in (amount_state.get("final_contribution_bb_by_pos") or {}).items()
+        },
+        "final_contribution_street_bb_by_pos": {pos: round(v, 4) for pos, v in current_bets.items()},
+        "semantic_action": last_action.get("semantic_action"),
+        "engine_action": last_action.get("engine_action"),
+        "raise_level_after_action": None,
+        "current_price_to_call_after_action": round(current_highest, 4),
+        "opener_pos": None,
+        "three_bettor_pos": None,
+        "four_bettor_pos": None,
+        "limpers": [],
+        "callers_after_open": 0,
+        "node_type_preview": None,
     }
 
 
-def infer_actions(previous_hand, analysis, settings) -> dict:
-    street = getattr(analysis, "street", "")
-    if str(street).lower() == "preflop":
+def infer_actions(previous_hand: Any, analysis: Any, settings: Any) -> dict:
+    street = str(getattr(analysis, "street", "preflop") or "preflop")
+    if street == "preflop":
         return _infer_preflop_actions(previous_hand, analysis, settings)
-    return _infer_non_preflop_actions(previous_hand, analysis, settings)
+    return _infer_postflop_actions(previous_hand, analysis, settings)
