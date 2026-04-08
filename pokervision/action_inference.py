@@ -41,6 +41,63 @@ def _engine_action_for(semantic_action: str) -> str:
         return "check"
     return "raise"
 
+LEGACY_ACTION_BY_SEMANTIC = {
+    "limp": "LIMP",
+    "open_raise": "OPEN",
+    "iso_raise": "OPEN",
+    "call": "CALL",
+    "3bet": "RAISE",
+    "4bet": "RAISE",
+    "cold_4bet": "RAISE",
+    "5bet_jam": "RAISE",
+    "check": "CHECK",
+    "bet": "BET",
+    "raise": "RAISE",
+    "fold": "FOLD",
+}
+
+
+def _legacy_action_name(semantic_action: str, engine_action: Optional[str] = None) -> str:
+    semantic = str(semantic_action or "").lower()
+    if semantic in LEGACY_ACTION_BY_SEMANTIC:
+        return LEGACY_ACTION_BY_SEMANTIC[semantic]
+    engine = str(engine_action or "").upper()
+    return engine or semantic.upper()
+
+
+def _format_amount_for_display(amount: Any) -> str:
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return str(amount)
+    if abs(value - round(value)) <= EPS:
+        return f"{value:.1f}"
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text += ".0"
+    return text
+
+
+def _decorate_legacy_action_fields(event: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(event)
+    legacy_action = _legacy_action_name(str(out.get("semantic_action") or ""), str(out.get("engine_action") or ""))
+    out.setdefault("action", legacy_action)
+    amount = out.get("final_contribution_street_bb")
+    if amount is None:
+        amount = out.get("final_contribution_bb")
+    if amount is None:
+        amount = out.get("amount_bb")
+    if amount is None or legacy_action in {"CHECK", "FOLD"}:
+        out.setdefault("action_display", legacy_action)
+    else:
+        out.setdefault("action_display", f"{legacy_action} {_format_amount_for_display(amount)}")
+    return out
+
+
+def _legacy_last_action_display(event: Dict[str, Any]) -> str:
+    decorated = _decorate_legacy_action_fields(event)
+    return str(decorated.get("action_display") or decorated.get("action") or "")
+
 
 def _player_is_folded(player_states: Dict[str, Dict[str, object]], position: str) -> bool:
     return bool((player_states or {}).get(position, {}).get("is_fold", False))
@@ -167,7 +224,7 @@ def _build_action_step(
     }
     if extra:
         payload.update(extra)
-    return payload
+    return _decorate_legacy_action_fields(payload)
 
 
 def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> Dict[str, Any]:
@@ -229,7 +286,7 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
                     extra={"reason": "bb_closes_action_vs_limp"},
                 )
                 action_history.append(step)
-                last_actions_by_position[position] = "check"
+                last_actions_by_position[position] = _legacy_last_action_display(step)
                 acted_positions.append(position)
             else:
                 skipped_positions.append(position)
@@ -321,7 +378,7 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
             extra=extra,
         )
         action_history.append(step)
-        last_actions_by_position[position] = semantic_action
+        last_actions_by_position[position] = _legacy_last_action_display(step)
         acted_positions.append(position)
 
     node_type_preview = _derive_node_type_preview(
@@ -344,8 +401,8 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         "last_aggressor_position": four_bettor_pos or three_bettor_pos or opener_pos,
         "acted_positions": list(acted_positions),
         "last_actions_by_position": dict(last_actions_by_position),
-        "actions_this_frame": list(action_history),
-        "action_history": list(action_history),
+        "actions_this_frame": [_decorate_legacy_action_fields(item) for item in action_history],
+        "action_history": [_decorate_legacy_action_fields(item) for item in action_history],
         "final_contribution_bb_by_pos": {
             pos: round(value, 4) for pos, value in contributions.items()
         },
@@ -434,8 +491,9 @@ def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) ->
                 "frame_id": getattr(analysis, "frame_id", None),
                 "timestamp": getattr(analysis, "timestamp", None),
             }
+            action = _decorate_legacy_action_fields(action)
             actions.append(action)
-            last_actions_by_position[position] = "fold"
+            last_actions_by_position[position] = _legacy_last_action_display(action)
             if position not in acted_positions:
                 acted_positions.append(position)
             continue
@@ -458,8 +516,9 @@ def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) ->
                 "frame_id": getattr(analysis, "frame_id", None),
                 "timestamp": getattr(analysis, "timestamp", None),
             }
+            action = _decorate_legacy_action_fields(action)
             actions.append(action)
-            last_actions_by_position[position] = semantic_action
+            last_actions_by_position[position] = _legacy_last_action_display(action)
             street_commitments[position] = current_amount
             if semantic_action in {"bet", "raise"}:
                 current_highest = max(current_highest, current_amount)
@@ -485,8 +544,9 @@ def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) ->
                 "frame_id": getattr(analysis, "frame_id", None),
                 "timestamp": getattr(analysis, "timestamp", None),
             }
+            action = _decorate_legacy_action_fields(action)
             actions.append(action)
-            last_actions_by_position[position] = "check"
+            last_actions_by_position[position] = _legacy_last_action_display(action)
             acted_positions.append(position)
 
     last_action = actions[-1] if actions else {}
@@ -498,8 +558,8 @@ def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) ->
         "last_aggressor_position": last_aggressor,
         "acted_positions": list(acted_positions),
         "last_actions_by_position": dict(last_actions_by_position),
-        "actions_this_frame": list(actions),
-        "action_history": list(actions),
+        "actions_this_frame": [_decorate_legacy_action_fields(item) for item in actions],
+        "action_history": [_decorate_legacy_action_fields(item) for item in actions],
         "final_contribution_bb_by_pos": {
             str(pos): round(_safe_float(amount, 0.0), 4)
             for pos, amount in (amount_state.get("final_contribution_bb_by_pos") or {}).items()

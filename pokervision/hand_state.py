@@ -229,7 +229,7 @@ class HandStateManager:
         if self._player_states_changed(hand, analysis):
             notes.append("player states changed")
         if notes:
-            return MatchDecision(MATCH_WEAK, "; ".join(notes))
+            return MatchDecision(MATCH_WEAK_CONFLICT, "; ".join(notes))
         return MatchDecision(MATCH_STRONG, "same hero cards confirmed")
 
     def _street_transition_allowed(self, old: str, new: str) -> bool:
@@ -244,8 +244,11 @@ class HandStateManager:
 
         # Даже если hand stale/closed, сначала обязаны сравнить HERO cards.
         decision = self.compare(self.active_hand, analysis)
-        if decision.status in {MATCH_STRONG, MATCH_WEAK}:
+        if decision.status in {MATCH_STRONG, MATCH_WEAK, MATCH_WEAK_CONFLICT}:
+            self.active_hand.conflict_state = decision.reason if decision.status == MATCH_WEAK_CONFLICT else None
             self._update_hand(self.active_hand, analysis)
+            self.active_hand.conflict_state = decision.reason if decision.status == MATCH_WEAK_CONFLICT else None
+            self._sync_snapshot_status(self.active_hand)
             return self.active_hand, decision, False
 
         self.active_hand.status = "closed"
