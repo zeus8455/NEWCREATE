@@ -10,7 +10,7 @@ class Settings:
     schema_version: str = "1.1"
     debug_mode: bool = True
     monitor_index: int = 1
-    mock_table_size: int = 6
+    mock_table_size: tuple[int, int] = (1280, 720)
     frame_debounce_ms: int = 250
     ui_refresh_ms: int = 400
     hand_stale_timeout_sec: float = 12.0
