@@ -7,7 +7,6 @@ from typing import Optional
 
 from .models import FrameAnalysis, HandError, HandState, utc_now_iso
 
-
 MATCH_STRONG = "strong_match"
 MATCH_WEAK = "weak_match"
 MATCH_WEAK_CONFLICT = "weak_conflict"
@@ -54,7 +53,7 @@ class HandStateManager:
         elif hand.status == "error":
             freshness = "error"
             warnings.append("State is error")
-        hand.render_state_snapshot["status"] = "ok" if hand.status in {"active", "stale"} else hand.status
+        hand.render_state_snapshot["status"] = "ok" if hand.status in {"active", "stale", "closed"} else hand.status
         hand.render_state_snapshot["freshness"] = freshness
         hand.render_state_snapshot["warnings"] = warnings
         hand.render_state_snapshot["updated_at"] = hand.updated_at
@@ -129,58 +128,53 @@ class HandStateManager:
         return False
 
     def compare(self, hand: HandState, analysis: FrameAnalysis) -> MatchDecision:
+        # Единственный критерий принадлежности к раздаче: карты HERO.
         if self._normalized_hero_cards(hand.hero_cards) != self._normalized_hero_cards(analysis.hero_cards):
             return MatchDecision(MATCH_NONE, "hero_cards changed")
 
-        conflict_reasons: list[str] = []
-
+        # Остальные различия не должны открывать новую раздачу.
+        notes: list[str] = []
         if hand.player_count != analysis.player_count:
-            conflict_reasons.append("player_count changed")
+            notes.append("player_count changed")
         if hand.table_format != analysis.table_format:
-            conflict_reasons.append("table_format changed")
+            notes.append("table_format changed")
         if hand.hero_position != analysis.hero_position:
-            conflict_reasons.append("hero_position changed")
+            notes.append("hero_position changed")
         if hand.occupied_positions != analysis.occupied_positions:
-            conflict_reasons.append("occupied_positions changed")
-
+            notes.append("occupied_positions changed")
         center_shift = self._table_center_shift(hand, analysis)
         if center_shift > self.table_center_max_shift_px:
-            conflict_reasons.append(f"table center shifted by {center_shift:.1f}px")
+            notes.append(f"table center shifted by {center_shift:.1f}px")
         if self._position_geometry_conflict(hand, analysis):
-            conflict_reasons.append("seat geometry changed")
+            notes.append("seat geometry changed")
 
         current_street = hand.street_state.get("current_street", "preflop")
         if not self._street_transition_allowed(current_street, analysis.street):
-            conflict_reasons.append(f"street transition {current_street}->{analysis.street} invalid")
-
-        if conflict_reasons:
-            return MatchDecision(MATCH_WEAK_CONFLICT, "; ".join(conflict_reasons))
+            notes.append(f"street transition {current_street}->{analysis.street} invalid")
 
         if self._player_states_changed(hand, analysis):
-            return MatchDecision(MATCH_WEAK, "player states changed")
-        if current_street == analysis.street:
-            return MatchDecision(MATCH_STRONG, "same hero cards confirmed")
-        return MatchDecision(MATCH_STRONG, "same hero cards with valid street transition")
+            notes.append("player states changed")
+
+        if notes:
+            return MatchDecision(MATCH_WEAK, "; ".join(notes))
+        return MatchDecision(MATCH_STRONG, "same hero cards confirmed")
 
     def _street_transition_allowed(self, old: str, new: str) -> bool:
         rank = {"preflop": 0, "flop": 1, "turn": 2, "river": 3}
         if old == new:
             return True
-        return rank.get(new, -1) == rank.get(old, -1) + 1
+        return rank.get(new, -1) >= rank.get(old, -1)
 
     def update_or_create(self, analysis: FrameAnalysis) -> tuple[HandState, MatchDecision, bool]:
-        if self.active_hand is None or self.active_hand.status == "closed":
+        if self.active_hand is None:
             return self.create_hand(analysis), MatchDecision(MATCH_STRONG, "created new hand"), True
+
+        # Даже если hand stale/closed, сначала обязаны сравнить HERO cards.
         decision = self.compare(self.active_hand, analysis)
         if decision.status in {MATCH_STRONG, MATCH_WEAK}:
             self._update_hand(self.active_hand, analysis)
             return self.active_hand, decision, False
-        if decision.status == MATCH_WEAK_CONFLICT:
-            self.active_hand.status = "stale"
-            self.active_hand.conflict_state = decision.reason
-            self._append_frame_log(self.active_hand, analysis, matched_existing=True, processing_status="warning")
-            self._sync_snapshot_status(self.active_hand)
-            return self.active_hand, decision, False
+
         self.active_hand.status = "closed"
         self.active_hand.processing_summary["hand_closed"] = True
         self._sync_snapshot_status(self.active_hand)
@@ -192,6 +186,10 @@ class HandStateManager:
         hand.conflict_state = None
         hand.updated_at = analysis.timestamp
         hand.last_seen_at = analysis.timestamp
+        hand.player_count = int(analysis.player_count or hand.player_count)
+        hand.table_format = str(analysis.table_format or hand.table_format)
+        hand.hero_position = str(analysis.hero_position or hand.hero_position)
+        hand.occupied_positions = list(analysis.occupied_positions)
         hand.positions = dict(analysis.positions)
         hand.table_center = analysis.table_center
         hand.table_amount_state = dict(analysis.table_amount_state)
@@ -201,7 +199,9 @@ class HandStateManager:
         hand.player_states = {position: dict(payload) for position, payload in analysis.player_states.items()}
         if analysis.street != hand.street_state.get("current_street"):
             hand.street_state["current_street"] = analysis.street
-            hand.street_state.setdefault("street_history", []).append(analysis.street)
+            history = hand.street_state.setdefault("street_history", [])
+            if analysis.street not in history:
+                history.append(analysis.street)
         self._append_frame_log(hand, analysis, matched_existing=True, processing_status="ok")
         hand.processing_summary["frames_seen_for_this_hand"] += 1
         hand.processing_summary["successful_frames"] += 1
@@ -233,11 +233,8 @@ class HandStateManager:
         hand = self.active_hand
         age_sec = self._seconds_between(hand.last_seen_at, now_timestamp)
         previous_status = hand.status
-        if age_sec >= self.close_timeout_sec and hand.status != "closed":
-            hand.status = "closed"
-            hand.updated_at = now_timestamp
-            hand.processing_summary["hand_closed"] = True
-        elif age_sec >= self.stale_timeout_sec and hand.status == "active":
+        # Не закрываем hand автоматически: same HERO cards должны позволять продолжить ту же раздачу.
+        if age_sec >= self.stale_timeout_sec and hand.status == "active":
             hand.status = "stale"
             hand.updated_at = now_timestamp
         changed = hand.status != previous_status
