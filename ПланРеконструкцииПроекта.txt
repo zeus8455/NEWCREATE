@@ -1,0 +1,36 @@
+Чёткий план реконструкции я бы зафиксировал так.
+
+Шаг 1. Сразу исправить правило same hand в hand_state.py.
+compare() должен решать только по hero_cards: те же карты — обновляем тот же hand; другие карты — закрываем текущий hand и открываем новый. Все остальные отличия (player_count, hero_position, occupied_positions, геометрия) переводятся не в MATCH_NONE, а в warnings/diagnostics или максимум в weak_conflict, но без открытия нового hand по этим признакам. Это маленькая правка, но она уберёт хаотическое дробление hand.json.
+
+Шаг 2. Ввести новый канонический слой normalizer между table_amount_logic и action_inference.
+Нужен отдельный модуль, лучше новый файл, а не латка внутри старого inference: например, amounts_and_actions.py или amount_normalization.py. На его вход идут table_amount_state, street, player_count, occupied_positions, hero_position, player_states. На его выходе — final_contribution_bb_by_pos и final_contribution_street_bb_by_pos. На префлопе этот слой обязан автоматически стартовать с SB=0.5, BB=1.0, а для HU — BTN/SB=0.5, BB=1.0, после чего накладывать видимые Chips. posted_blinds здесь должны стать либо подтверждением forced-вкладов, либо диагностикой, но не единственным источником истины.
+
+Шаг 3. Полностью заменить текущую префлоп-реконструкцию в action_inference.py.
+Не “подправить”, а именно заменить её внутреннюю модель. Новый реконструктор должен идти в порядке позиций по формату стола и держать состояние: current_price_to_call, raise_level, limpers, opener_pos, three_bettor_pos, four_bettor_pos, callers_after_open, action_history. Из него должны рождаться limp, open_raise, iso_raise, call, 3bet, 4bet, cold_4bet, 5bet_jam, check. Отдельно рядом должны писаться engine_action и final_contribution_bb. Пока это не сделано, всё остальное будет продолжать ошибаться, даже если CV видит ставки идеально.
+
+Шаг 4. Довести table_amount_logic.py до правил blind reinterpretation.
+Добавить постобработку: если улица не префлоп и регион — SB или BB, он не должен уходить в posted_blinds, а должен переопределяться в обычный Chips. Если на префлопе SB/BB матчится далеко или не к своей логической blind-позиции, маркер должен либо удаляться как ложный, либо переводиться в Chips и участвовать в ставочной геометрии. При конфликте BB и Chips в одной зоне должен выживать один смысл, а не две сущности сразу.
+
+Шаг 5. Встроить solver bridge внутрь пакета pokervision, а не держать его во внешнем launcher.
+Практически это означает: вынести EngineBridge, SpotDescription и связанные хелперы из pokervision_engine_launcher_v2.py в новый pokervision/solver_bridge.py, почти без переписывания бизнес-логики. Потом вызывать solver_bridge.build_recommendation(analysis, hand) прямо из основного pipeline после hand_manager.update_or_create(...) и до build_render_state(...). Так ты перестанешь дублировать семантику между “основным проектом” и “внешним лончером”.
+
+Шаг 6. Сделать официальный projection в PreflopContext и PostflopContext.
+Из реконструкции нужно строить два стабильных payload-а:
+для префлопа — node_type, hero_pos, opener_pos, three_bettor_pos, four_bettor_pos, limpers, callers, action_history;
+для постфлопа — pot_before_hero, to_call, effective_stack, hero_position, villain_positions, line_context, street, player_count.
+Это должен быть отдельный небольшой переводчик, а не россыпь логики по launcher-у и UI. Под эти контракты у тебя движок уже готов.
+
+Шаг 7. Расширить models.py и render_state.py новыми нормализованными блоками.
+В HandState и FrameAnalysis нужно хранить не только сырые table_amount_state и action_inference, но и нормализованные секции, например: amount_state, reconstructed_preflop, reconstructed_postflop, advisor_input, engine_result. В RenderState Нужно добавить recommended_action, recommended_amount_to, recommended_size_pct, node_type, hero_decision_debug, engine_status, analysis_panel. Сейчас модели уже умеют хранить hand/action state и render snapshot, поэтому это не ломает архитектуру, а расширяет её в нужную сторону.
+
+Шаг 8. Обновить UI, но только после solver integration.
+main.py сейчас передаёт в UI только render_state и статус; PokerTableWindow/панель должны начать отображать итоговое действие движка, ключевой node_type, action history, ranges/debug и статус расчёта. Иначе ты встроишь solver, но визуально ничего не изменится. UI здесь — не первый шаг, а последний потребитель уже нормализованного состояния.
+
+Шаг 9. Добавить тесты не “вообще”, а именно на канонические споты ТЗ.
+Здесь я бы не полагался на текущий test_core.py как на достаточное покрытие: даже если там уже есть общие pipeline-тесты, тебе нужны отдельные deterministic-тесты на реконструкцию ставок. Минимум:
+UTG limp -> MP iso_raise -> CO call -> SB 3bet;
+SB first-in limp -> BB check;
+CO open -> BTN 3bet -> SB cold_4bet;
+Постфлоп pot_before=6, increment=4 -> 66.67%;
+один и тот же hand при тех же hero_cards, но шумном player_count/occupied_positions, не должен пересоздаваться. Эти тесты должны бить не по UI, а по reconstruction layer и solver projection layer.
