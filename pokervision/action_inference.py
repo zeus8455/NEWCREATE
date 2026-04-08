@@ -162,7 +162,7 @@ def _can_reuse_previous_action_state(previous_hand, analysis, street: str) -> bo
     if not previous_hand:
         return False
     previous_action_state = dict(getattr(previous_hand, "action_state", {}) or {})
-    if not _can_reuse_previous_action_state(previous_hand, analysis, street):
+    if previous_action_state.get("street") != street:
         return False
     return _normalized_hero_cards_from_hand(previous_hand) == _normalized_hero_cards_from_analysis(analysis)
 
