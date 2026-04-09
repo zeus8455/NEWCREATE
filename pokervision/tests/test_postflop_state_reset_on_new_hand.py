@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 import unittest
 
-from current_action_inference import infer_actions
+from pokervision.action_inference import infer_actions
 
 
 class DummySettings:
