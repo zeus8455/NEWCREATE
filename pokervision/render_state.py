@@ -30,6 +30,8 @@ def _build_legacy_solver_annotation(hand: HandState) -> dict:
             "raw_repr": str(hand.hero_decision_debug.get("raw_repr") or ""),
         },
     }
+    if hand.solver_warnings:
+        result["warnings"] = list(hand.solver_warnings)
     if hand.solver_errors:
         result["errors"] = list(hand.solver_errors)
     return result
@@ -144,6 +146,7 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         engine_result=dict(hand.engine_result),
         solver_context=dict(hand.solver_context),
         solver_status=hand.solver_status,
+        solver_warnings=list(hand.solver_warnings),
         solver_errors=list(hand.solver_errors),
         hero_decision_debug=dict(hand.hero_decision_debug),
         recommended_action=solver_ui["recommended_action"],

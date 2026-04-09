@@ -877,6 +877,30 @@ class EngineBridge:
             "result": result,
         }
 
+    def _can_use_postflop_line_builder(self, board_cards: Sequence[str], street: str) -> bool:
+        expected_by_street = {"flop": 3, "turn": 4, "river": 5}
+        resolved_street = str(street or "").lower()
+        expected_count = expected_by_street.get(resolved_street)
+        if expected_count is None:
+            return False
+
+        current_count = len(list(board_cards or []))
+        if current_count != expected_count:
+            return False
+
+        # CRITICAL INVARIANT:
+        # The external postflop line-builder consumes `board_runout`, not just the
+        # currently visible board, and that downstream contract is only fully
+        # satisfied once river is known. Even though the runtime postflop context is
+        # valid on flop (3 cards) and turn (4 cards), sending those partial boards
+        # into villain_postflop_players -> analyze_multiway_postflop_line would
+        # create a false solver failure: "board_runout должен содержать ровно 5 карт".
+        #
+        # Keep this guard strict: use line-based villain projection only on river
+        # with a real 5-card runout. Earlier streets must use safer preflop-based
+        # villain projection so valid flop/turn spots do not pollute solver_errors.
+        return resolved_street == "river" and current_count == 5
+
     def _build_postflop_line_context(self, hand, street: str) -> Dict[str, object]:
         current_actions = [a for a in self._street_actions(hand, street)]
         preflop_actions = [a for a in self._street_actions(hand, "preflop")]
@@ -915,24 +939,12 @@ class EngineBridge:
         villain_positions = list(getattr(context, "villain_positions", []) or [])
         hero_in_position = self._hero_in_position_postflop(hand)
         board_now = list(getattr(context, "board", []) or [])
-        full_runout_available = len(board_now) == 5
+        can_use_line_builder = self._can_use_postflop_line_builder(board_now, street)
 
-        # CRITICAL INVARIANT:
-        # The external postflop range-builder currently requires a full 5-card
-        # board_runout when villain_postflop_players are used. On flop/turn we
-        # only know the current board (3 or 4 cards), so sending
-        # villain_postflop_players first would create a false solver error even
-        # though the hero decision can still be computed from preflop spots.
-        #
-        # Therefore:
-        # - river (5 cards): prefer villain_postflop_players with full runout
-        # - flop/turn (3/4 cards): skip that path and use villain_preflop_spots
-        #   directly, avoiding noisy "board_runout должен содержать ровно 5 карт"
-        #   errors for otherwise valid runtime spots.
         result = None
         warning_messages: List[str] = []
 
-        if full_runout_available:
+        if can_use_line_builder:
             try:
                 villain_postflop_players = self._build_villain_postflop_players(hand, street)
                 result = _solve_hero_postflop(

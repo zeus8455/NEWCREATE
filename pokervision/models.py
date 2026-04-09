@@ -155,6 +155,7 @@ class FrameAnalysis:
     solver_context_preview: Dict[str, Any] = field(default_factory=dict)
     solver_result: Dict[str, Any] = field(default_factory=dict)
     solver_status: str = "not_run"
+    solver_warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -193,6 +194,7 @@ class FrameAnalysis:
             "solver_context_preview": dict(self.solver_context_preview),
             "solver_result": dict(self.solver_result),
             "solver_status": self.solver_status,
+            "solver_warnings": list(self.solver_warnings),
         }
 
 
@@ -243,6 +245,7 @@ class HandState:
     engine_result: Dict[str, Any] = field(default_factory=dict)
     solver_context: Dict[str, Any] = field(default_factory=dict)
     solver_status: str = "not_run"
+    solver_warnings: List[str] = field(default_factory=list)
     solver_errors: List[str] = field(default_factory=list)
     hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
 
@@ -280,6 +283,7 @@ class HandState:
             "engine_result": dict(self.engine_result),
             "solver_context": dict(self.solver_context),
             "solver_status": self.solver_status,
+            "solver_warnings": list(self.solver_warnings),
             "solver_errors": list(self.solver_errors),
             "hero_decision_debug": dict(self.hero_decision_debug),
         }
@@ -311,6 +315,7 @@ class RenderState:
     engine_result: Dict[str, Any] = field(default_factory=dict)
     solver_context: Dict[str, Any] = field(default_factory=dict)
     solver_status: str = "not_run"
+    solver_warnings: List[str] = field(default_factory=list)
     solver_errors: List[str] = field(default_factory=list)
     hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
     recommended_action: Optional[str] = None

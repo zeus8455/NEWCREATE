@@ -87,7 +87,7 @@ def _safe_jsonable(value: Any, *, depth: int = 0) -> Any:
     return repr(value)
 
 
-def _build_legacy_solver_summary(payload: Any, status: str, errors: list[str]) -> dict[str, Any]:
+def _build_legacy_solver_summary(payload: Any, status: str, errors: list[str], warnings: list[str]) -> dict[str, Any]:
     result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
     summary = {
         "status": status,
@@ -96,6 +96,8 @@ def _build_legacy_solver_summary(payload: Any, status: str, errors: list[str]) -
             "raw_repr": repr(result_obj) if result_obj is not None else "",
         },
     }
+    if warnings:
+        summary["warnings"] = list(warnings)
     if errors:
         summary["errors"] = list(errors)
     return summary
@@ -210,7 +212,7 @@ def _build_engine_result_from_payload(payload: Any, status: str) -> dict[str, An
     }
 
 
-def _build_hero_decision_debug_from_payload(payload: Any, status: str, errors: list[str]) -> dict[str, Any]:
+def _build_hero_decision_debug_from_payload(payload: Any, status: str, errors: list[str], warnings: list[str]) -> dict[str, Any]:
     result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
     debug = {
         "status": status,
@@ -222,6 +224,8 @@ def _build_hero_decision_debug_from_payload(payload: Any, status: str, errors: l
         "preflop": _safe_jsonable(getattr(result_obj, "preflop", None)) if result_obj is not None else None,
         "postflop": _safe_jsonable(getattr(result_obj, "postflop", None)) if result_obj is not None else None,
     }
+    if warnings:
+        debug["warnings"] = list(warnings)
     if errors:
         debug["errors"] = list(errors)
     return debug
@@ -237,6 +241,7 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
     """
     status = "ok"
     errors: list[str] = []
+    warnings: list[str] = []
     if isinstance(payload, dict):
         status = str(payload.get("status") or "ok")
         if payload.get("errors"):
@@ -251,14 +256,21 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
     solver_output = _get_solver_output_payload(payload)
     advisor_input = _get_advisor_input_payload(analysis, hand, payload, solver_context)
     if isinstance(payload, dict) and payload.get("warnings"):
-        errors.extend([str(item) for item in payload.get("warnings", [])])
+        # CRITICAL INVARIANT:
+        # Solver warnings are diagnostic notes from a successful or recovered path
+        # (for example, when the bridge skips a line-builder that requires a full
+        # 5-card runout and transparently falls back to a safer projection). They
+        # must stay visible in JSON/debug output, but they must NOT be promoted to
+        # solver_errors, otherwise harmless fallback notes look like real solver failures.
+        warnings.extend([str(item) for item in payload.get("warnings", [])])
     engine_result = _build_engine_result_from_payload(payload, status)
-    hero_debug = _build_hero_decision_debug_from_payload(payload, status, errors)
-    legacy_summary = _build_legacy_solver_summary(payload, status, errors)
+    hero_debug = _build_hero_decision_debug_from_payload(payload, status, errors, warnings)
+    legacy_summary = _build_legacy_solver_summary(payload, status, errors, warnings)
 
     analysis.solver_context_preview = dict(solver_context)
     analysis.solver_result = dict(engine_result)
     analysis.solver_status = status
+    analysis.solver_warnings = list(warnings)
 
     hand.solver_context = dict(solver_context)
     hand.advisor_input = dict(advisor_input)
@@ -266,6 +278,7 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
     hand.solver_output = dict(solver_output)
     hand.engine_result = dict(engine_result)
     hand.solver_status = status
+    hand.solver_warnings = list(warnings)
     hand.solver_errors = list(errors)
     hand.hero_decision_debug = dict(hero_debug)
 
