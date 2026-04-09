@@ -16,6 +16,8 @@ the external launcher.
 """
 
 from dataclasses import dataclass, field, fields as dataclass_fields, is_dataclass
+import json
+import hashlib
 import importlib
 from types import ModuleType
 from typing import Any, Dict, List, Optional
@@ -744,6 +746,60 @@ class EngineBridge:
             )
         return players
 
+    def _build_fingerprint_from_contract_payload(self, contract_payload: Dict[str, Any]) -> str:
+        canonical_payload = {
+            "context_type": contract_payload.get("context_type"),
+            "solver_input": contract_payload,
+        }
+        raw = json.dumps(
+            _serialize_for_payload(canonical_payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def build_recommendation_preview(self, analysis, hand):
+        """Build canonical solver inputs without running the solver.
+
+        CRITICAL INVARIANT:
+        Reuse/dedup decisions must be based on the exact same normalized
+        contract that would be sent into the solver layer. Do not invent a
+        separate pipeline-only heuristic signature here, otherwise repeated
+        frames can look "equal" to the cache while producing a different
+        advisor/solver input.
+        """
+        if hand is None:
+            return {"status": "not_run", "reason": "no_hand", "fingerprint": ""}
+
+        hero_cards = list(getattr(hand, "hero_cards", None) or getattr(analysis, "hero_cards", None) or [])
+        if len(hero_cards) != 2:
+            return {"status": "not_run", "reason": "hero_cards_not_exactly_two", "fingerprint": ""}
+
+        street_state = getattr(hand, "street_state", {}) if hand is not None else {}
+        street = str(street_state.get("current_street") or getattr(analysis, "street", None) or "preflop").lower()
+
+        if street == "preflop":
+            context = self.build_preflop_context(analysis, hand)
+        else:
+            context = self.build_postflop_context(analysis, hand, street)
+
+        if context is None:
+            return {"status": "not_run", "reason": f"{street}_context_unavailable", "fingerprint": ""}
+
+        contract_payload = self._build_contract_payload(context)
+        fingerprint = self._build_fingerprint_from_contract_payload(contract_payload)
+        context_type = type(context).__name__
+        return {
+            "status": "ready",
+            "context_type": context_type,
+            "solver_context": dict(contract_payload),
+            "advisor_input": dict(contract_payload),
+            "solver_input": dict(contract_payload),
+            "projection_meta": _serialize_for_payload(getattr(context, "meta", {})),
+            "fingerprint": fingerprint,
+        }
+
     # ------------------------------
     # recommendation construction
     # ------------------------------
@@ -998,10 +1054,16 @@ def build_recommendation(analysis, hand, settings=None):
     return EngineBridge(settings=settings).build_recommendation(analysis, hand)
 
 
+def build_solver_contract_preview(analysis, hand, settings=None):
+    """Build normalized solver/advisor inputs without executing the solver."""
+    return EngineBridge(settings=settings).build_recommendation_preview(analysis, hand)
+
+
 __all__ = [
     "ActorFlags",
     "ReplayState",
     "SpotDescription",
     "EngineBridge",
     "build_recommendation",
+    "build_solver_contract_preview",
 ]

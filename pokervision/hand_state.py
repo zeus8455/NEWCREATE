@@ -159,6 +159,8 @@ class HandStateManager:
                 "successful_frames": 0,
                 "failed_frames": 0,
                 "hand_closed": False,
+                "solver_runs": 0,
+                "solver_reuse_hits": 0,
             },
             table_center=analysis.table_center,
             table_amount_state=dict(analysis.table_amount_state),

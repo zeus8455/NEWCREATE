@@ -19,7 +19,10 @@ from .hand_state import HandStateManager, MATCH_STRONG, MATCH_WEAK
 from .json_manager import save_hand_json
 from .models import BBox, Detection, FrameAnalysis, HandState
 from .render_state import build_render_state
-from .solver_bridge import build_recommendation as build_solver_recommendation
+from .solver_bridge import (
+    build_recommendation as build_solver_recommendation,
+    build_solver_contract_preview,
+)
 from .storage import StorageManager
 from .table_amount_logic import build_table_amount_state
 from .table_logic import assign_positions, determine_hero_position
@@ -257,6 +260,8 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
     analysis.solver_result = dict(engine_result)
     analysis.solver_status = status
     analysis.solver_warnings = list(warnings)
+    analysis.solver_result_reused = False
+    analysis.solver_reuse_reason = None
 
     hand.solver_context = dict(solver_context)
     hand.advisor_input = dict(advisor_input)
@@ -272,6 +277,65 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
     # next hand.json/save cycle keeps only the canonical top-level solver fields.
     hand.processing_summary.pop("solver_bridge", None)
     return None
+
+
+def _extract_solver_fingerprint(preview: Any) -> str:
+    if isinstance(preview, dict):
+        return str(preview.get("fingerprint") or "")
+    return ""
+
+
+def _ensure_solver_summary_fields(hand: HandState) -> None:
+    summary = hand.processing_summary
+    summary.setdefault("solver_runs", 0)
+    summary.setdefault("solver_reuse_hits", 0)
+
+
+def _mark_solver_run_attempt(hand: HandState) -> None:
+    _ensure_solver_summary_fields(hand)
+    hand.processing_summary["solver_runs"] += 1
+
+
+def _mark_solver_reuse_hit(hand: HandState) -> None:
+    _ensure_solver_summary_fields(hand)
+    hand.processing_summary["solver_reuse_hits"] += 1
+
+
+def _apply_reused_solver_payload(analysis: FrameAnalysis, hand: HandState, preview: Any) -> None:
+    reuse_reason = "same_solver_input_fingerprint"
+    solver_context = _safe_jsonable((preview or {}).get("solver_context", {})) if isinstance(preview, dict) else {}
+    solver_input = _safe_jsonable((preview or {}).get("solver_input", {})) if isinstance(preview, dict) else {}
+    advisor_input = _safe_jsonable((preview or {}).get("advisor_input", {})) if isinstance(preview, dict) else {}
+    solver_fingerprint = _extract_solver_fingerprint(preview)
+
+    reused_engine_result = dict(hand.engine_result or {})
+    reused_engine_result["status"] = "reused_previous_solver_result"
+    reused_engine_result["reused"] = True
+    reused_engine_result["reuse_reason"] = reuse_reason
+
+    reused_debug = dict(hand.hero_decision_debug or {})
+    reused_debug["status"] = "reused_previous_solver_result"
+    reused_debug["reused"] = True
+    reused_debug["reuse_reason"] = reuse_reason
+
+    analysis.solver_context_preview = dict(solver_context)
+    analysis.solver_result = dict(reused_engine_result)
+    analysis.solver_status = "reused_previous_solver_result"
+    analysis.solver_warnings = list(hand.solver_warnings or [])
+    analysis.solver_fingerprint_preview = solver_fingerprint
+    analysis.solver_result_reused = True
+    analysis.solver_reuse_reason = reuse_reason
+
+    hand.solver_context = dict(solver_context)
+    hand.advisor_input = dict(advisor_input)
+    hand.solver_input = dict(solver_input)
+    hand.engine_result = dict(reused_engine_result)
+    hand.hero_decision_debug = dict(reused_debug)
+    hand.solver_status = "reused_previous_solver_result"
+    hand.solver_result_reused = True
+    hand.solver_reuse_reason = reuse_reason
+    hand.solver_fingerprint = solver_fingerprint
+
 
 
 class PokerVisionPipeline:
@@ -562,26 +626,53 @@ class PokerVisionPipeline:
         previous_street = self.hand_manager.active_hand.street_state.get("current_street") if self.hand_manager.active_hand else None
         hand, decision, created_new = self.hand_manager.update_or_create(analysis)
 
-        # CRITICAL INVARIANT:
-        # The main pipeline must invoke the solver bridge after HandState is updated and
-        # before RenderState/hand.json are built. Do not move this logic back into the
-        # external launcher, otherwise main-pipeline semantics and persisted state drift again.
-        solver_result: Any = None
-        try:
-            solver_result = build_solver_recommendation(analysis, hand, self.settings)
-        except Exception as exc:  # pragma: no cover - defensive safety for runtime integration
-            solver_result = {
-                "status": "error",
-                "error": str(exc),
-                "result": None,
-            }
-        _apply_solver_payload(analysis, hand, solver_result)
-
         repeated_same_street = (
             not created_new
             and previous_street == analysis.street
             and decision.status in {MATCH_STRONG, MATCH_WEAK}
         )
+
+        # CRITICAL INVARIANT:
+        # Solver dedup must be decided from the normalized solver/advisor contract,
+        # not from ad-hoc image/frame heuristics. A repeated same-street frame may
+        # still contain a new action or changed pot/to_call, and only the previewed
+        # solver input fingerprint can tell whether the actual solver state is the same.
+        solver_preview = build_solver_contract_preview(analysis, hand, self.settings)
+        solver_fingerprint = _extract_solver_fingerprint(solver_preview)
+        analysis.solver_fingerprint_preview = solver_fingerprint
+
+        can_reuse_solver = (
+            repeated_same_street
+            and isinstance(solver_preview, dict)
+            and str(solver_preview.get("status") or "") == "ready"
+            and bool(solver_fingerprint)
+            and solver_fingerprint == str(hand.solver_fingerprint or "")
+            and bool(hand.solver_output or hand.engine_result)
+            and str(hand.solver_status or "") in {"ok", "reused_previous_solver_result"}
+        )
+
+        if can_reuse_solver:
+            _mark_solver_reuse_hit(hand)
+            _apply_reused_solver_payload(analysis, hand, solver_preview)
+        else:
+            _mark_solver_run_attempt(hand)
+            solver_result: Any = None
+            try:
+                solver_result = build_solver_recommendation(analysis, hand, self.settings)
+            except Exception as exc:  # pragma: no cover - defensive safety for runtime integration
+                solver_result = {
+                    "status": "error",
+                    "error": str(exc),
+                    "result": None,
+                }
+            _apply_solver_payload(analysis, hand, solver_result)
+            hand.solver_fingerprint = solver_fingerprint
+            hand.solver_result_reused = False
+            hand.solver_reuse_reason = None
+            if hand.solver_status == "ok":
+                hand.solver_run_frame_id = frame.frame_id
+                hand.solver_run_timestamp = frame.timestamp
+
         save_only_raw = repeated_same_street and not self.settings.normal_mode_save_repeated_frames
         artifacts = self.storage.save_pipeline_artifacts(
             hand.hand_id,

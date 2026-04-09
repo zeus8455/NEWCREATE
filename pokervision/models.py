@@ -156,6 +156,9 @@ class FrameAnalysis:
     solver_result: Dict[str, Any] = field(default_factory=dict)
     solver_status: str = "not_run"
     solver_warnings: List[str] = field(default_factory=list)
+    solver_fingerprint_preview: str = ""
+    solver_result_reused: bool = False
+    solver_reuse_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -195,6 +198,9 @@ class FrameAnalysis:
             "solver_result": dict(self.solver_result),
             "solver_status": self.solver_status,
             "solver_warnings": list(self.solver_warnings),
+            "solver_fingerprint_preview": self.solver_fingerprint_preview,
+            "solver_result_reused": self.solver_result_reused,
+            "solver_reuse_reason": self.solver_reuse_reason,
         }
 
 
@@ -250,6 +256,11 @@ class HandState:
     solver_warnings: List[str] = field(default_factory=list)
     solver_errors: List[str] = field(default_factory=list)
     hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
+    solver_fingerprint: str = ""
+    solver_result_reused: bool = False
+    solver_reuse_reason: Optional[str] = None
+    solver_run_frame_id: Optional[str] = None
+    solver_run_timestamp: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -288,6 +299,11 @@ class HandState:
             "solver_warnings": list(self.solver_warnings),
             "solver_errors": list(self.solver_errors),
             "hero_decision_debug": dict(self.hero_decision_debug),
+            "solver_fingerprint": self.solver_fingerprint,
+            "solver_result_reused": self.solver_result_reused,
+            "solver_reuse_reason": self.solver_reuse_reason,
+            "solver_run_frame_id": self.solver_run_frame_id,
+            "solver_run_timestamp": self.solver_run_timestamp,
         }
 
 
@@ -323,6 +339,11 @@ class RenderState:
     solver_warnings: List[str] = field(default_factory=list)
     solver_errors: List[str] = field(default_factory=list)
     hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
+    solver_fingerprint: str = ""
+    solver_result_reused: bool = False
+    solver_reuse_reason: Optional[str] = None
+    solver_run_frame_id: Optional[str] = None
+    solver_run_timestamp: Optional[str] = None
     recommended_action: Optional[str] = None
     recommended_amount_to: Optional[float] = None
     recommended_size_pct: Optional[float] = None
