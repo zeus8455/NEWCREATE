@@ -15,7 +15,7 @@ from pokervision.solver_bridge import EngineBridge
 
 
 @dataclass(slots=True)
-class FakePreflopContext:
+class PreflopContext:
     hero_hand: list[str]
     hero_pos: str
     node_type: str
@@ -31,7 +31,7 @@ class FakePreflopContext:
 
 
 @dataclass(slots=True)
-class FakePostflopContext:
+class PostflopContext:
     hero_hand: list[str]
     board: list[str]
     pot_before_hero: float
@@ -47,7 +47,7 @@ class FakePostflopContext:
 
 
 @dataclass(slots=True)
-class FakeHeroDecision:
+class HeroDecision:
     street: str
     engine_action: str
     amount_to: float | None = None
@@ -71,11 +71,11 @@ class SolverBridgeStep8Tests(unittest.TestCase):
         self.orig_post = bridge_mod._solve_hero_postflop
 
         bridge_mod._import_decision_types = lambda: (
-            FakeHeroDecision,
-            FakePostflopContext,
-            FakePreflopContext,
+            HeroDecision,
+            PostflopContext,
+            PreflopContext,
         )
-        bridge_mod._solve_hero_preflop = lambda context: FakeHeroDecision(
+        bridge_mod._solve_hero_preflop = lambda context: HeroDecision(
             street="preflop",
             engine_action="raise",
             actor_pos=context.hero_pos,
@@ -87,7 +87,7 @@ class SolverBridgeStep8Tests(unittest.TestCase):
                 "callers": context.callers,
             },
         )
-        bridge_mod._solve_hero_postflop = lambda context, **kwargs: FakeHeroDecision(
+        bridge_mod._solve_hero_postflop = lambda context, **kwargs: HeroDecision(
             street=context.street or "flop",
             engine_action="call",
             actor_pos=context.hero_position,
@@ -373,7 +373,8 @@ class SolverBridgeStep8Tests(unittest.TestCase):
             self.fail(f"bridge crashed instead of returning a controlled payload: {exc}")
 
         self.assertIsInstance(payload, dict)
-        self.assertIn(payload.get("status"), {"ok", "error", "not_run"})
+        self.assertIn(payload.get("status"), {"ok", "not_run", "solver_unavailable"})
+        self.assertIn("warnings", payload)
 
     def test_repeated_frame_reuses_previous_solver_result_when_fingerprint_same(self):
         bridge = EngineBridge(settings=None)

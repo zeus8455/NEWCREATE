@@ -88,16 +88,14 @@ class SolverStateFieldsTests(unittest.TestCase):
             postflop=None,
         )
         payload = {"status": "ok", "result": hero_decision}
-
-        legacy = _apply_solver_payload(analysis, hand, payload)
-
+        returned = _apply_solver_payload(analysis, hand, payload)
+        self.assertIsNone(returned)
         self.assertEqual(analysis.solver_status, "ok")
         self.assertEqual(hand.solver_status, "ok")
         self.assertEqual(hand.engine_result["engine_action"], "raise")
         self.assertEqual(hand.advisor_input["context_type"], "PreflopContext")
         self.assertEqual(hand.solver_context["node_type_preview"], "facing_open")
         self.assertEqual(hand.hero_decision_debug["type"], "SimpleNamespace")
-        self.assertEqual(legacy["status"], "ok")
 
     def test_render_state_surfaces_top_level_solver_fields(self):
         hand = self._make_hand()
@@ -119,15 +117,15 @@ class SolverStateFieldsTests(unittest.TestCase):
             ),
         }
         _apply_solver_payload(analysis, hand, payload)
-
         render = build_render_state(hand, "frame_1", "2026-04-09T10:00:00.000")
         data = render.to_dict()
-
         self.assertEqual(data["solver_status"], "ok")
         self.assertIn("engine_action", data["engine_result"])
         self.assertEqual(data["advisor_input"]["context_type"], "PreflopContext")
         self.assertIn("raw_repr", data["hero_decision_debug"])
-        self.assertIn("solver_bridge", data["action_annotations"])
+        self.assertNotIn("solver_bridge", data["action_annotations"])
+        self.assertIn("solver_input", data)
+        self.assertIn("solver_output", data)
 
 
 if __name__ == "__main__":

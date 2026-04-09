@@ -126,6 +126,68 @@ class ReplayState:
         return self.flags_by_pos[pos]
 
 
+
+
+@dataclass(slots=True)
+class FallbackPreflopContext:
+    hero_hand: list[str]
+    hero_pos: str
+    node_type: str
+    range_owner: str = "hero"
+    opener_pos: Optional[str] = None
+    three_bettor_pos: Optional[str] = None
+    four_bettor_pos: Optional[str] = None
+    limpers: int = 0
+    callers: int = 0
+    dead_cards: list[str] = field(default_factory=list)
+    action_history: list[dict[str, Any]] = field(default_factory=list)
+    meta: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class FallbackPostflopContext:
+    hero_hand: list[str]
+    board: list[str]
+    pot_before_hero: float
+    to_call: float = 0.0
+    effective_stack: Optional[float] = None
+    hero_position: Optional[str] = None
+    villain_positions: list[str] = field(default_factory=list)
+    line_context: dict[str, object] = field(default_factory=dict)
+    dead_cards: list[str] = field(default_factory=list)
+    street: Optional[str] = None
+    player_count: Optional[int] = None
+    meta: dict[str, object] = field(default_factory=dict)
+
+
+def _resolve_decision_types():
+    """Resolve external decision-layer dataclasses with a safe local fallback.
+
+    Unit/integration tests in PokerVision must stay runnable even when the
+    external solver files (decision_types.py / hero_decision.py / etc.) are not
+    present on PYTHONPATH. The bridge still needs to build a canonical
+    normalized contract preview/fingerprint in that environment, so missing
+    decision-layer imports must not crash the pipeline.
+    """
+    try:
+        return _import_decision_types()
+    except Exception:
+        return None, FallbackPostflopContext, FallbackPreflopContext
+
+
+def _canonical_context_type(context: Any) -> str:
+    if context is None:
+        return ""
+    explicit = getattr(context, "context_type", None)
+    if explicit:
+        return str(explicit)
+    if hasattr(context, "hero_pos") and hasattr(context, "node_type"):
+        return "PreflopContext"
+    if hasattr(context, "pot_before_hero") and hasattr(context, "board"):
+        return "PostflopContext"
+    return type(context).__name__
+
+
 @dataclass(slots=True)
 class SpotDescription:
     node_type: str
@@ -137,7 +199,7 @@ class SpotDescription:
     callers: int = 0
 
     def to_preflop_context(self, hero_hand: List[str], *, meta: Optional[Dict[str, object]] = None):
-        _, _, PreflopContext = _import_decision_types()
+        _, _, PreflopContext = _resolve_decision_types()
         return PreflopContext(
             hero_hand=list(hero_hand),
             hero_pos=self.hero_pos,
@@ -789,7 +851,7 @@ class EngineBridge:
 
         contract_payload = self._build_contract_payload(context)
         fingerprint = self._build_fingerprint_from_contract_payload(contract_payload)
-        context_type = type(context).__name__
+        context_type = _canonical_context_type(context)
         return {
             "status": "ready",
             "context_type": context_type,
@@ -817,7 +879,7 @@ class EngineBridge:
         return self._build_postflop_recommendation(analysis, hand, hero_cards, street)
 
     def build_preflop_context(self, analysis, hand):
-        _, _, PreflopContext = _import_decision_types()
+        _, _, PreflopContext = _resolve_decision_types()
         hero_cards = list(getattr(hand, "hero_cards", None) or getattr(analysis, "hero_cards", None) or [])
         if hand is None or len(hero_cards) != 2:
             return None
@@ -872,7 +934,7 @@ class EngineBridge:
         )
 
     def build_postflop_context(self, analysis, hand, street: Optional[str] = None):
-        _, PostflopContext, _ = _import_decision_types()
+        _, PostflopContext, _ = _resolve_decision_types()
         hero_cards = list(getattr(hand, "hero_cards", None) or getattr(analysis, "hero_cards", None) or [])
         if hand is None or len(hero_cards) != 2:
             return None
@@ -911,7 +973,7 @@ class EngineBridge:
         )
 
     def _build_contract_payload(self, context: Any) -> Dict[str, Any]:
-        contract_name = type(context).__name__
+        contract_name = _canonical_context_type(context)
         payload = {"context_type": contract_name}
         payload.update(_serialize_for_payload(context))
         return payload
@@ -921,7 +983,20 @@ class EngineBridge:
         if context is None:
             return {"status": "not_run", "result": None, "reason": "preflop_context_unavailable"}
         contract_payload = self._build_contract_payload(context)
-        result = _solve_hero_preflop(context)
+        try:
+            result = _solve_hero_preflop(context)
+        except Exception as exc:
+            return {
+                "status": "solver_unavailable",
+                "context_type": "PreflopContext",
+                "solver_context": dict(contract_payload),
+                "advisor_input": dict(contract_payload),
+                "solver_input": dict(contract_payload),
+                "solver_output": {"result": None, "context_type": "PreflopContext"},
+                "projection_meta": _serialize_for_payload(getattr(context, "meta", {})),
+                "warnings": [str(exc)],
+                "result": None,
+            }
         return {
             "status": "ok",
             "context_type": "PreflopContext",
@@ -1026,17 +1101,20 @@ class EngineBridge:
             except Exception as exc2:
                 warning_messages.append(str(exc2))
                 fallback_ranges = [GENERIC_WIDE_RANGE for _ in villain_positions]
-                result = _solve_hero_postflop(
-                    context,
-                    villain_ranges=fallback_ranges,
-                    hero_in_position=hero_in_position,
-                    trials=5000,
-                    seed=42,
-                )
+                try:
+                    result = _solve_hero_postflop(
+                        context,
+                        villain_ranges=fallback_ranges,
+                        hero_in_position=hero_in_position,
+                        trials=5000,
+                        seed=42,
+                    )
+                except Exception as exc3:
+                    warning_messages.append(str(exc3))
 
         contract_payload = self._build_contract_payload(context)
         payload = {
-            "status": "ok",
+            "status": "ok" if result is not None else "solver_unavailable",
             "context_type": "PostflopContext",
             "solver_context": dict(contract_payload),
             "advisor_input": dict(contract_payload),
