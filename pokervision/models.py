@@ -50,6 +50,19 @@ def derive_amount_state(
     }
 
 
+def _normalize_count_field(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def derive_reconstructed_preflop(
     action_state: Optional[Dict[str, Any]],
     *,
@@ -68,8 +81,8 @@ def derive_reconstructed_preflop(
         "opener_pos": action_state.get("opener_pos"),
         "three_bettor_pos": action_state.get("three_bettor_pos"),
         "four_bettor_pos": action_state.get("four_bettor_pos"),
-        "limpers": int(action_state.get("limpers", 0) or 0),
-        "callers": int(action_state.get("callers_after_open", 0) or 0),
+        "limpers": _normalize_count_field(action_state.get("limpers", 0)),
+        "callers": _normalize_count_field(action_state.get("callers_after_open", 0)),
         "action_history": action_history,
         "final_contribution_bb_by_pos": _copy_dict(action_state.get("final_contribution_bb_by_pos")),
         "same_hand_identity": bool(action_state.get("same_hand_identity", False)),
