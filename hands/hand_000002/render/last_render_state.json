@@ -1,0 +1,748 @@
+{
+  "hand_id": "hand_000002",
+  "player_count": 6,
+  "table_format": "6max",
+  "street": "preflop",
+  "hero_position": "MP",
+  "hero_cards": [
+    "Tc",
+    "4c"
+  ],
+  "board_cards": [],
+  "players": {
+    "BTN": {
+      "position": "BTN",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": true,
+      "is_fold": false,
+      "is_all_in": false,
+      "is_active": true,
+      "stack_bb": 72.5,
+      "stack_text_raw": "72.5",
+      "state_warnings": [],
+      "cards_visible": false,
+      "show_card_backs": true,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "SB": {
+      "position": "SB",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": false,
+      "is_fold": false,
+      "is_all_in": false,
+      "is_active": true,
+      "stack_bb": 113.0,
+      "stack_text_raw": "113",
+      "state_warnings": [],
+      "cards_visible": false,
+      "show_card_backs": true,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "BB": {
+      "position": "BB",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": false,
+      "is_fold": false,
+      "is_all_in": false,
+      "is_active": true,
+      "stack_bb": 106.0,
+      "stack_text_raw": "106",
+      "state_warnings": [],
+      "cards_visible": false,
+      "show_card_backs": true,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "UTG": {
+      "position": "UTG",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": false,
+      "is_fold": true,
+      "is_all_in": false,
+      "is_active": false,
+      "stack_bb": 81.0,
+      "stack_text_raw": "81",
+      "state_warnings": [
+        "Fold token detected together with numeric stack"
+      ],
+      "cards_visible": false,
+      "show_card_backs": false,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "MP": {
+      "position": "MP",
+      "occupied": true,
+      "is_hero": true,
+      "is_button": false,
+      "is_fold": false,
+      "is_all_in": false,
+      "is_active": true,
+      "stack_bb": 93.5,
+      "stack_text_raw": "93.5",
+      "state_warnings": [],
+      "cards_visible": true,
+      "show_card_backs": false,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "CO": {
+      "position": "CO",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": false,
+      "is_fold": false,
+      "is_all_in": false,
+      "is_active": true,
+      "stack_bb": 101.0,
+      "stack_text_raw": "101",
+      "state_warnings": [],
+      "cards_visible": false,
+      "show_card_backs": true,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    }
+  },
+  "status": "ok",
+  "warnings": [],
+  "freshness": "live",
+  "source_frame_id": "frame_0068",
+  "source_timestamp": "2026-04-09T17:58:35.825",
+  "updated_at": "2026-04-09T17:58:35.825",
+  "seat_order": [
+    "MP",
+    "CO",
+    "BTN",
+    "SB",
+    "BB",
+    "UTG"
+  ],
+  "table_amount_state": {
+    "total_pot": {
+      "raw_text": "1.5",
+      "amount_bb": 1.5,
+      "bbox": {
+        "x1": 1311.678955078125,
+        "y1": 489.3546142578125,
+        "x2": 1397.261962890625,
+        "y2": 534.597900390625
+      },
+      "digit_tokens": [
+        {
+          "label": "1",
+          "confidence": 0.9388619661331177,
+          "bbox": {
+            "x1": 0.26661598682403564,
+            "y1": 8.93848991394043,
+            "x2": 11.930724143981934,
+            "y2": 36.60467529296875
+          }
+        },
+        {
+          "label": ".",
+          "confidence": 0.8861414790153503,
+          "bbox": {
+            "x1": 16.78772735595703,
+            "y1": 29.599515914916992,
+            "x2": 23.81804847717285,
+            "y2": 37.328712463378906
+          }
+        },
+        {
+          "label": "5",
+          "confidence": 0.9557901620864868,
+          "bbox": {
+            "x1": 25.468591690063477,
+            "y1": 9.185909271240234,
+            "x2": 41.9503059387207,
+            "y2": 37.12338638305664
+          }
+        }
+      ],
+      "warnings": [],
+      "source": "TotalPot"
+    },
+    "posted_blinds": {
+      "SB": {
+        "raw_text": "0.5",
+        "amount_bb": 0.5,
+        "bbox": {
+          "x1": 1238.94091796875,
+          "y1": 385.7752685546875,
+          "x2": 1334.265625,
+          "y2": 473.8741455078125
+        },
+        "digit_tokens": [
+          {
+            "label": "0",
+            "confidence": 0.9855281710624695,
+            "bbox": {
+              "x1": 5.901480674743652,
+              "y1": 51.442264556884766,
+              "x2": 20.633630752563477,
+              "y2": 79.2186279296875
+            }
+          },
+          {
+            "label": ".",
+            "confidence": 0.6398472785949707,
+            "bbox": {
+              "x1": 21.287961959838867,
+              "y1": 70.6021499633789,
+              "x2": 29.295663833618164,
+              "y2": 78.32891845703125
+            }
+          },
+          {
+            "label": "5",
+            "confidence": 0.940937876701355,
+            "bbox": {
+              "x1": 31.66843032836914,
+              "y1": 52.316410064697266,
+              "x2": 46.489078521728516,
+              "y2": 78.91633605957031
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "SB",
+        "matched_position": "SB",
+        "nearest_position": "SB",
+        "nearest_distance_px": 206.2,
+        "logical_position": "SB",
+        "logical_distance_px": 206.2
+      },
+      "BB": {
+        "raw_text": "1",
+        "amount_bb": 1.0,
+        "bbox": {
+          "x1": 1679.9217529296875,
+          "y1": 432.7580871582031,
+          "x2": 1759.9068603515625,
+          "y2": 541.50927734375
+        },
+        "digit_tokens": [
+          {
+            "label": "1",
+            "confidence": 0.9570321440696716,
+            "bbox": {
+              "x1": 10.014939308166504,
+              "y1": 69.05924987792969,
+              "x2": 22.245590209960938,
+              "y2": 95.21049499511719
+            }
+          }
+        ],
+        "warnings": [
+          "Blind marker did not confidently match logical blind position"
+        ],
+        "source": "BB",
+        "matched_position": "BB",
+        "nearest_position": "BB",
+        "nearest_distance_px": 259.306,
+        "logical_position": "BB",
+        "logical_distance_px": 259.306
+      }
+    },
+    "bets_by_position": {},
+    "unassigned_chips": [],
+    "warnings": [
+      "BB: ambiguous blind marker match"
+    ],
+    "errors": []
+  },
+  "amount_normalization": {
+    "street": "preflop",
+    "player_count": 6,
+    "occupied_positions": [
+      "BTN",
+      "SB",
+      "BB",
+      "UTG",
+      "MP",
+      "CO"
+    ],
+    "active_positions": [
+      "BTN",
+      "SB",
+      "BB",
+      "MP",
+      "CO"
+    ],
+    "hero_position": "MP",
+    "forced_blinds_by_position": {
+      "SB": 0.5,
+      "BB": 1.0
+    },
+    "visible_bets_by_position": {},
+    "final_contribution_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 0.0,
+      "MP": 0.0,
+      "CO": 0.0
+    },
+    "final_contribution_street_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 0.0,
+      "MP": 0.0,
+      "CO": 0.0
+    },
+    "blind_diagnostics": {
+      "SB": {
+        "matched_position": "SB",
+        "amount_bb": 0.5,
+        "warnings": [],
+        "source": "SB",
+        "confirmed": true
+      },
+      "BB": {
+        "matched_position": "BB",
+        "amount_bb": 1.0,
+        "warnings": [
+          "Blind marker did not confidently match logical blind position"
+        ],
+        "source": "BB",
+        "confirmed": true
+      }
+    },
+    "total_pot_bb": 1.5,
+    "warnings": []
+  },
+  "amount_state": {
+    "street": "preflop",
+    "total_pot_bb": 1.5,
+    "forced_blinds_by_position": {
+      "SB": 0.5,
+      "BB": 1.0
+    },
+    "visible_bets_by_position": {},
+    "final_contribution_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 0.0,
+      "MP": 0.0,
+      "CO": 0.0
+    },
+    "final_contribution_street_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 0.0,
+      "MP": 0.0,
+      "CO": 0.0
+    },
+    "posted_blinds": {
+      "SB": {
+        "raw_text": "0.5",
+        "amount_bb": 0.5,
+        "bbox": {
+          "x1": 1238.94091796875,
+          "y1": 385.7752685546875,
+          "x2": 1334.265625,
+          "y2": 473.8741455078125
+        },
+        "digit_tokens": [
+          {
+            "label": "0",
+            "confidence": 0.9855281710624695,
+            "bbox": {
+              "x1": 5.901480674743652,
+              "y1": 51.442264556884766,
+              "x2": 20.633630752563477,
+              "y2": 79.2186279296875
+            }
+          },
+          {
+            "label": ".",
+            "confidence": 0.6398472785949707,
+            "bbox": {
+              "x1": 21.287961959838867,
+              "y1": 70.6021499633789,
+              "x2": 29.295663833618164,
+              "y2": 78.32891845703125
+            }
+          },
+          {
+            "label": "5",
+            "confidence": 0.940937876701355,
+            "bbox": {
+              "x1": 31.66843032836914,
+              "y1": 52.316410064697266,
+              "x2": 46.489078521728516,
+              "y2": 78.91633605957031
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "SB",
+        "matched_position": "SB",
+        "nearest_position": "SB",
+        "nearest_distance_px": 206.2,
+        "logical_position": "SB",
+        "logical_distance_px": 206.2
+      },
+      "BB": {
+        "raw_text": "1",
+        "amount_bb": 1.0,
+        "bbox": {
+          "x1": 1679.9217529296875,
+          "y1": 432.7580871582031,
+          "x2": 1759.9068603515625,
+          "y2": 541.50927734375
+        },
+        "digit_tokens": [
+          {
+            "label": "1",
+            "confidence": 0.9570321440696716,
+            "bbox": {
+              "x1": 10.014939308166504,
+              "y1": 69.05924987792969,
+              "x2": 22.245590209960938,
+              "y2": 95.21049499511719
+            }
+          }
+        ],
+        "warnings": [
+          "Blind marker did not confidently match logical blind position"
+        ],
+        "source": "BB",
+        "matched_position": "BB",
+        "nearest_position": "BB",
+        "nearest_distance_px": 259.306,
+        "logical_position": "BB",
+        "logical_distance_px": 259.306
+      }
+    },
+    "bets_by_position": {},
+    "blind_diagnostics": {
+      "SB": {
+        "matched_position": "SB",
+        "amount_bb": 0.5,
+        "warnings": [],
+        "source": "SB",
+        "confirmed": true
+      },
+      "BB": {
+        "matched_position": "BB",
+        "amount_bb": 1.0,
+        "warnings": [
+          "Blind marker did not confidently match logical blind position"
+        ],
+        "source": "BB",
+        "confirmed": true
+      }
+    },
+    "warnings": [
+      "BB: ambiguous blind marker match"
+    ],
+    "errors": []
+  },
+  "action_annotations": {
+    "actions_log": [],
+    "last_actions_by_position": {}
+  },
+  "reconstructed_preflop": {
+    "street": "preflop",
+    "hero_position": "MP",
+    "node_type": "unopened",
+    "opener_pos": null,
+    "three_bettor_pos": null,
+    "four_bettor_pos": null,
+    "limpers": 0,
+    "callers": 0,
+    "action_history": [],
+    "final_contribution_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 0.0,
+      "MP": 0.0,
+      "CO": 0.0
+    },
+    "same_hand_identity": false
+  },
+  "reconstructed_postflop": {
+    "street": "preflop",
+    "pot_before_hero": null,
+    "to_call": null,
+    "effective_stack": null,
+    "hero_position": null,
+    "villain_positions": [],
+    "line_context": {},
+    "action_history": [],
+    "final_contribution_street_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 0.0,
+      "MP": 0.0,
+      "CO": 0.0
+    }
+  },
+  "advisor_input": {
+    "context_type": "PreflopContext",
+    "hero_hand": [
+      "Tc",
+      "4c"
+    ],
+    "hero_pos": "MP",
+    "node_type": "unopened",
+    "range_owner": "hero",
+    "opener_pos": null,
+    "three_bettor_pos": null,
+    "four_bettor_pos": null,
+    "limpers": 0,
+    "callers": 0,
+    "dead_cards": [],
+    "action_history": [],
+    "meta": {
+      "source": "pokervision",
+      "hand_id": "hand_000002",
+      "hero_original_position": "MP",
+      "projection_source": "action_state_preview",
+      "actions_seen": []
+    }
+  },
+  "solver_input": {
+    "context_type": "PreflopContext",
+    "hero_hand": [
+      "Tc",
+      "4c"
+    ],
+    "hero_pos": "MP",
+    "node_type": "unopened",
+    "range_owner": "hero",
+    "opener_pos": null,
+    "three_bettor_pos": null,
+    "four_bettor_pos": null,
+    "limpers": 0,
+    "callers": 0,
+    "dead_cards": [],
+    "action_history": [],
+    "meta": {
+      "source": "pokervision",
+      "hand_id": "hand_000002",
+      "hero_original_position": "MP",
+      "projection_source": "action_state_preview",
+      "actions_seen": []
+    }
+  },
+  "solver_output": {
+    "result": {
+      "street": "preflop",
+      "engine_action": "fold",
+      "amount_to": null,
+      "size_pct": null,
+      "actor_name": "Hero",
+      "actor_pos": "MP",
+      "reason": "preflop:fold",
+      "confidence": 1.0,
+      "source": "hero_decision.preflop",
+      "preflop": {
+        "action": "fold",
+        "hand_class": "T4s",
+        "actor_name": "Hero",
+        "actor_pos": "MP",
+        "is_mixed_action": false,
+        "matching_actions": [],
+        "selected_range_expr": "",
+        "action_map": {
+          "raise": "22+ A2s+ K9s+ Q9s+ J9s+ T8s+ 97s+ A9o+ KTo+ QTo+"
+        },
+        "range_source": null,
+        "amount_to": null,
+        "size_pct": null,
+        "fallback_reason": null,
+        "meta": {
+          "description": "RFI from MP"
+        }
+      },
+      "postflop": null,
+      "villain_sources": [],
+      "debug": {
+        "node_type": "unopened",
+        "range_owner": "hero",
+        "matching_actions": [],
+        "fallback_reason": null,
+        "meta": {
+          "source": "pokervision",
+          "hand_id": "hand_000002",
+          "hero_original_position": "MP",
+          "projection_source": "action_state_preview",
+          "actions_seen": []
+        }
+      }
+    },
+    "context_type": "PreflopContext"
+  },
+  "engine_result": {
+    "status": "reused_previous_solver_result",
+    "decision_type": "HeroDecision",
+    "street": "preflop",
+    "engine_action": "fold",
+    "amount_to": null,
+    "size_pct": null,
+    "reason": "preflop:fold",
+    "confidence": 1.0,
+    "source": "hero_decision.preflop",
+    "actor_name": "Hero",
+    "actor_pos": "MP",
+    "reused": true,
+    "reuse_reason": "same_solver_input_fingerprint"
+  },
+  "solver_context": {
+    "context_type": "PreflopContext",
+    "hero_hand": [
+      "Tc",
+      "4c"
+    ],
+    "hero_pos": "MP",
+    "node_type": "unopened",
+    "range_owner": "hero",
+    "opener_pos": null,
+    "three_bettor_pos": null,
+    "four_bettor_pos": null,
+    "limpers": 0,
+    "callers": 0,
+    "dead_cards": [],
+    "action_history": [],
+    "meta": {
+      "source": "pokervision",
+      "hand_id": "hand_000002",
+      "hero_original_position": "MP",
+      "projection_source": "action_state_preview",
+      "actions_seen": []
+    }
+  },
+  "solver_status": "reused_previous_solver_result",
+  "solver_warnings": [],
+  "solver_errors": [],
+  "hero_decision_debug": {
+    "status": "reused_previous_solver_result",
+    "type": "HeroDecision",
+    "raw_repr": "HeroDecision(street='preflop', engine_action='fold', amount_to=None, size_pct=None, actor_name='Hero', actor_pos='MP', reason='preflop:fold', confidence=1.0, source='hero_decision.preflop', preflop=PreflopDecision(action='fold', hand_class='T4s', actor_name='Hero', actor_pos='MP', is_mixed_action=False, matching_actions=[], selected_range_expr='', action_map={'raise': '22+ A2s+ K9s+ Q9s+ J9s+ T8s+ 97s+ A9o+ KTo+ QTo+'}, range_source=None, amount_to=None, size_pct=None, fallback_reason=None, meta={'description': 'RFI from MP'}), postflop=None, villain_sources=[], debug={'node_type': 'unopened', 'range_owner': 'hero', 'matching_actions': [], 'fallback_reason': None, 'meta': {'source': 'pokervision', 'hand_id': 'hand_000002', 'hero_original_position': 'MP', 'projection_source': 'action_state_preview', 'actions_seen': []}})",
+    "source": "hero_decision.preflop",
+    "confidence": 1.0,
+    "reason": "preflop:fold",
+    "preflop": {
+      "action": "fold",
+      "hand_class": "T4s",
+      "actor_name": "Hero",
+      "actor_pos": "MP",
+      "is_mixed_action": false,
+      "matching_actions": [],
+      "selected_range_expr": "",
+      "action_map": {
+        "raise": "22+ A2s+ K9s+ Q9s+ J9s+ T8s+ 97s+ A9o+ KTo+ QTo+"
+      },
+      "range_source": null,
+      "amount_to": null,
+      "size_pct": null,
+      "fallback_reason": null,
+      "meta": {
+        "description": "RFI from MP"
+      }
+    },
+    "postflop": null,
+    "reused": true,
+    "reuse_reason": "same_solver_input_fingerprint"
+  },
+  "solver_fingerprint": "18b5e41017cde809140767b5c137233cafcd152d",
+  "solver_result_reused": true,
+  "solver_reuse_reason": "same_solver_input_fingerprint",
+  "solver_run_frame_id": "frame_0066",
+  "solver_run_timestamp": "2026-04-09T17:58:33.293",
+  "recommended_action": "FOLD",
+  "recommended_amount_to": null,
+  "recommended_size_pct": null,
+  "node_type": "unopened",
+  "engine_status": "reused_previous_solver_result",
+  "analysis_panel": {
+    "street": "preflop",
+    "context_type": "PreflopContext",
+    "node_type": "unopened",
+    "hero_position": "MP",
+    "villain_positions": [],
+    "player_count": 6,
+    "action_history": [],
+    "reconstructed_action_history": [],
+    "recommended_action": "FOLD",
+    "recommended_amount_to": null,
+    "recommended_size_pct": null,
+    "decision_reason": "preflop:fold",
+    "decision_confidence": 1.0,
+    "engine_status": "reused_previous_solver_result",
+    "solver_status": "reused_previous_solver_result",
+    "solver_reused": true,
+    "solver_reuse_reason": "same_solver_input_fingerprint",
+    "solver_fingerprint": "18b5e41017cde809140767b5c137233cafcd152d",
+    "solver_warnings": [],
+    "solver_errors": [],
+    "range_debug": {
+      "action": "fold",
+      "hand_class": "T4s",
+      "actor_name": "Hero",
+      "actor_pos": "MP",
+      "is_mixed_action": false,
+      "matching_actions": [],
+      "selected_range_expr": "",
+      "action_map": {
+        "raise": "22+ A2s+ K9s+ Q9s+ J9s+ T8s+ 97s+ A9o+ KTo+ QTo+"
+      },
+      "range_source": null,
+      "amount_to": null,
+      "size_pct": null,
+      "fallback_reason": null,
+      "meta": {
+        "description": "RFI from MP"
+      }
+    },
+    "hero_decision_debug": {
+      "status": "reused_previous_solver_result",
+      "type": "HeroDecision",
+      "raw_repr": "HeroDecision(street='preflop', engine_action='fold', amount_to=None, size_pct=None, actor_name='Hero', actor_pos='MP', reason='preflop:fold', confidence=1.0, source='hero_decision.preflop', preflop=PreflopDecision(action='fold', hand_class='T4s', actor_name='Hero', actor_pos='MP', is_mixed_action=False, matching_actions=[], selected_range_expr='', action_map={'raise': '22+ A2s+ K9s+ Q9s+ J9s+ T8s+ 97s+ A9o+ KTo+ QTo+'}, range_source=None, amount_to=None, size_pct=None, fallback_reason=None, meta={'description': 'RFI from MP'}), postflop=None, villain_sources=[], debug={'node_type': 'unopened', 'range_owner': 'hero', 'matching_actions': [], 'fallback_reason': None, 'meta': {'source': 'pokervision', 'hand_id': 'hand_000002', 'hero_original_position': 'MP', 'projection_source': 'action_state_preview', 'actions_seen': []}})",
+      "source": "hero_decision.preflop",
+      "confidence": 1.0,
+      "reason": "preflop:fold",
+      "preflop": {
+        "action": "fold",
+        "hand_class": "T4s",
+        "actor_name": "Hero",
+        "actor_pos": "MP",
+        "is_mixed_action": false,
+        "matching_actions": [],
+        "selected_range_expr": "",
+        "action_map": {
+          "raise": "22+ A2s+ K9s+ Q9s+ J9s+ T8s+ 97s+ A9o+ KTo+ QTo+"
+        },
+        "range_source": null,
+        "amount_to": null,
+        "size_pct": null,
+        "fallback_reason": null,
+        "meta": {
+          "description": "RFI from MP"
+        }
+      },
+      "postflop": null,
+      "reused": true,
+      "reuse_reason": "same_solver_input_fingerprint"
+    }
+  }
+}

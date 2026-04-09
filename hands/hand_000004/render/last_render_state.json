@@ -1,0 +1,1229 @@
+{
+  "hand_id": "hand_000004",
+  "player_count": 6,
+  "table_format": "6max",
+  "street": "preflop",
+  "hero_position": "BB",
+  "hero_cards": [
+    "Ks",
+    "4h"
+  ],
+  "board_cards": [],
+  "players": {
+    "BTN": {
+      "position": "BTN",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": true,
+      "is_fold": true,
+      "is_all_in": false,
+      "is_active": false,
+      "stack_bb": 105.5,
+      "stack_text_raw": "105.5",
+      "state_warnings": [
+        "Fold token detected together with numeric stack"
+      ],
+      "cards_visible": false,
+      "show_card_backs": false,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "SB": {
+      "position": "SB",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": false,
+      "is_fold": true,
+      "is_all_in": false,
+      "is_active": false,
+      "stack_bb": 79.5,
+      "stack_text_raw": "79.5",
+      "state_warnings": [
+        "Fold token detected together with numeric stack"
+      ],
+      "cards_visible": false,
+      "show_card_backs": false,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "BB": {
+      "position": "BB",
+      "occupied": true,
+      "is_hero": true,
+      "is_button": false,
+      "is_fold": false,
+      "is_all_in": false,
+      "is_active": true,
+      "stack_bb": 94.0,
+      "stack_text_raw": "94",
+      "state_warnings": [],
+      "cards_visible": true,
+      "show_card_backs": false,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "UTG": {
+      "position": "UTG",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": false,
+      "is_fold": false,
+      "is_all_in": false,
+      "is_active": true,
+      "stack_bb": 102.5,
+      "stack_text_raw": "102.5",
+      "state_warnings": [],
+      "cards_visible": false,
+      "show_card_backs": true,
+      "current_bet_bb": 3.0,
+      "current_bet_raw": "3",
+      "last_action": "OPEN 3.0"
+    },
+    "MP": {
+      "position": "MP",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": false,
+      "is_fold": true,
+      "is_all_in": false,
+      "is_active": false,
+      "stack_bb": 69.5,
+      "stack_text_raw": "69.5",
+      "state_warnings": [
+        "Fold token detected together with numeric stack"
+      ],
+      "cards_visible": false,
+      "show_card_backs": false,
+      "current_bet_bb": 0.0,
+      "current_bet_raw": "",
+      "last_action": null
+    },
+    "CO": {
+      "position": "CO",
+      "occupied": true,
+      "is_hero": false,
+      "is_button": false,
+      "is_fold": false,
+      "is_all_in": false,
+      "is_active": true,
+      "stack_bb": 105.5,
+      "stack_text_raw": "105.5",
+      "state_warnings": [],
+      "cards_visible": false,
+      "show_card_backs": true,
+      "current_bet_bb": 7.5,
+      "current_bet_raw": "7.5",
+      "last_action": "RAISE 7.5"
+    }
+  },
+  "status": "ok",
+  "warnings": [],
+  "freshness": "live",
+  "source_frame_id": "frame_0348",
+  "source_timestamp": "2026-04-09T18:00:29.798",
+  "updated_at": "2026-04-09T18:00:29.798",
+  "seat_order": [
+    "BB",
+    "UTG",
+    "MP",
+    "CO",
+    "BTN",
+    "SB"
+  ],
+  "table_amount_state": {
+    "total_pot": {
+      "raw_text": "12",
+      "amount_bb": 12.0,
+      "bbox": {
+        "x1": 1317.836669921875,
+        "y1": 492.9527587890625,
+        "x2": 1398.122802734375,
+        "y2": 534.9512939453125
+      },
+      "digit_tokens": [
+        {
+          "label": "1",
+          "confidence": 0.9540964961051941,
+          "bbox": {
+            "x1": 0.08096694946289062,
+            "y1": 5.028430938720703,
+            "x2": 11.067702293395996,
+            "y2": 32.436038970947266
+          }
+        },
+        {
+          "label": "2",
+          "confidence": 0.9708068370819092,
+          "bbox": {
+            "x1": 14.019100189208984,
+            "y1": 5.315639495849609,
+            "x2": 31.83810043334961,
+            "y2": 32.7801399230957
+          }
+        }
+      ],
+      "warnings": [],
+      "source": "TotalPot"
+    },
+    "posted_blinds": {
+      "SB": {
+        "raw_text": "0.5",
+        "amount_bb": 0.5,
+        "bbox": {
+          "x1": 1725.0068359375,
+          "y1": 770.9365234375,
+          "x2": 1835.9716796875,
+          "y2": 865.8934326171875
+        },
+        "digit_tokens": [
+          {
+            "label": "0",
+            "confidence": 0.977824866771698,
+            "bbox": {
+              "x1": 14.498818397521973,
+              "y1": 58.02912521362305,
+              "x2": 29.271223068237305,
+              "y2": 86.43988800048828
+            }
+          },
+          {
+            "label": ".",
+            "confidence": 0.760612964630127,
+            "bbox": {
+              "x1": 29.9663143157959,
+              "y1": 77.52367401123047,
+              "x2": 38.09300994873047,
+              "y2": 85.49136352539062
+            }
+          },
+          {
+            "label": "5",
+            "confidence": 0.9450618624687195,
+            "bbox": {
+              "x1": 40.26552963256836,
+              "y1": 59.3158073425293,
+              "x2": 55.21818542480469,
+              "y2": 85.7099609375
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "SB",
+        "matched_position": "SB",
+        "nearest_position": "SB",
+        "nearest_distance_px": 234.688,
+        "logical_position": "SB",
+        "logical_distance_px": 234.688
+      },
+      "BB": {
+        "raw_text": "1",
+        "amount_bb": 1.0,
+        "bbox": {
+          "x1": 1239.1728515625,
+          "y1": 827.71630859375,
+          "x2": 1326.73046875,
+          "y2": 932.587646484375
+        },
+        "digit_tokens": [
+          {
+            "label": "1",
+            "confidence": 0.9646466970443726,
+            "bbox": {
+              "x1": 17.909019470214844,
+              "y1": 67.80323791503906,
+              "x2": 29.629112243652344,
+              "y2": 94.30812072753906
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "BB",
+        "matched_position": "BB",
+        "nearest_position": "BB",
+        "nearest_distance_px": 232.823,
+        "logical_position": "BB",
+        "logical_distance_px": 232.823
+      }
+    },
+    "bets_by_position": {
+      "CO": {
+        "raw_text": "7.5",
+        "amount_bb": 7.5,
+        "bbox": {
+          "x1": 1237.662109375,
+          "y1": 377.3592529296875,
+          "x2": 1379.025634765625,
+          "y2": 474.621826171875
+        },
+        "digit_tokens": [
+          {
+            "label": "7",
+            "confidence": 0.970036506652832,
+            "bbox": {
+              "x1": 6.480477809906006,
+              "y1": 60.508724212646484,
+              "x2": 22.68225860595703,
+              "y2": 88.55252075195312
+            }
+          },
+          {
+            "label": ".",
+            "confidence": 0.8663029670715332,
+            "bbox": {
+              "x1": 23.35531997680664,
+              "y1": 79.7221450805664,
+              "x2": 30.578264236450195,
+              "y2": 87.8290023803711
+            }
+          },
+          {
+            "label": "5",
+            "confidence": 0.9488118886947632,
+            "bbox": {
+              "x1": 32.62418746948242,
+              "y1": 61.38249588012695,
+              "x2": 48.03028869628906,
+              "y2": 87.44857025146484
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "Chips",
+        "matched_position": "CO",
+        "street": "preflop",
+        "matched_among_live_positions_only": true,
+        "match_phase": "live_positions",
+        "candidate_positions": [
+          "CO",
+          "BB",
+          "UTG"
+        ],
+        "candidate_positions_live_only": [
+          "CO",
+          "BB",
+          "UTG"
+        ],
+        "candidate_positions_all_occupied": [
+          "CO",
+          "BTN",
+          "MP",
+          "SB",
+          "BB",
+          "UTG"
+        ],
+        "match_score_px": 84.438,
+        "match_details": {
+          "score": 84.43839328307139,
+          "target_distance_px": 53.82187290563057,
+          "seat_distance_px": 203.33800543021079,
+          "line_distance_px": 36.019435738165676,
+          "projection_ratio": 0.48339782233084844,
+          "outside_penalty_px": 0.0
+        },
+        "second_best_match_score_px": 648.54
+      },
+      "UTG": {
+        "raw_text": "3",
+        "amount_bb": 3.0,
+        "bbox": {
+          "x1": 726.0784912109375,
+          "y1": 758.0916748046875,
+          "x2": 854.0572509765625,
+          "y2": 867.3736572265625
+        },
+        "digit_tokens": [
+          {
+            "label": "3",
+            "confidence": 0.9736551642417908,
+            "bbox": {
+              "x1": 22.255645751953125,
+              "y1": 72.254150390625,
+              "x2": 37.34602737426758,
+              "y2": 99.2543716430664
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "Chips",
+        "matched_position": "UTG",
+        "street": "preflop",
+        "matched_among_live_positions_only": true,
+        "match_phase": "live_positions",
+        "candidate_positions": [
+          "UTG",
+          "BB",
+          "CO"
+        ],
+        "candidate_positions_live_only": [
+          "UTG",
+          "BB",
+          "CO"
+        ],
+        "candidate_positions_all_occupied": [
+          "UTG",
+          "MP",
+          "BB",
+          "CO",
+          "SB",
+          "BTN"
+        ],
+        "match_score_px": 189.28,
+        "match_details": {
+          "score": 189.27992760890965,
+          "target_distance_px": 186.31779961119258,
+          "seat_distance_px": 259.0031808945904,
+          "line_distance_px": 3.4848564679024103,
+          "projection_ratio": 0.33734577417394984,
+          "outside_penalty_px": 0.0
+        },
+        "second_best_match_score_px": 889.195
+      }
+    },
+    "unassigned_chips": [],
+    "warnings": [],
+    "errors": []
+  },
+  "amount_normalization": {
+    "street": "preflop",
+    "player_count": 6,
+    "occupied_positions": [
+      "BTN",
+      "SB",
+      "BB",
+      "UTG",
+      "MP",
+      "CO"
+    ],
+    "active_positions": [
+      "BB",
+      "UTG",
+      "CO"
+    ],
+    "hero_position": "BB",
+    "forced_blinds_by_position": {
+      "SB": 0.5,
+      "BB": 1.0
+    },
+    "visible_bets_by_position": {
+      "CO": 7.5,
+      "UTG": 3.0
+    },
+    "final_contribution_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 3.0,
+      "MP": 0.0,
+      "CO": 7.5
+    },
+    "final_contribution_street_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 3.0,
+      "MP": 0.0,
+      "CO": 7.5
+    },
+    "blind_diagnostics": {
+      "SB": {
+        "matched_position": "SB",
+        "amount_bb": 0.5,
+        "warnings": [],
+        "source": "SB",
+        "confirmed": true
+      },
+      "BB": {
+        "matched_position": "BB",
+        "amount_bb": 1.0,
+        "warnings": [],
+        "source": "BB",
+        "confirmed": true
+      }
+    },
+    "total_pot_bb": 12.0,
+    "warnings": []
+  },
+  "amount_state": {
+    "street": "preflop",
+    "total_pot_bb": 12.0,
+    "forced_blinds_by_position": {
+      "SB": 0.5,
+      "BB": 1.0
+    },
+    "visible_bets_by_position": {
+      "CO": 7.5,
+      "UTG": 3.0
+    },
+    "final_contribution_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 3.0,
+      "MP": 0.0,
+      "CO": 7.5
+    },
+    "final_contribution_street_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 3.0,
+      "MP": 0.0,
+      "CO": 7.5
+    },
+    "posted_blinds": {
+      "SB": {
+        "raw_text": "0.5",
+        "amount_bb": 0.5,
+        "bbox": {
+          "x1": 1725.0068359375,
+          "y1": 770.9365234375,
+          "x2": 1835.9716796875,
+          "y2": 865.8934326171875
+        },
+        "digit_tokens": [
+          {
+            "label": "0",
+            "confidence": 0.977824866771698,
+            "bbox": {
+              "x1": 14.498818397521973,
+              "y1": 58.02912521362305,
+              "x2": 29.271223068237305,
+              "y2": 86.43988800048828
+            }
+          },
+          {
+            "label": ".",
+            "confidence": 0.760612964630127,
+            "bbox": {
+              "x1": 29.9663143157959,
+              "y1": 77.52367401123047,
+              "x2": 38.09300994873047,
+              "y2": 85.49136352539062
+            }
+          },
+          {
+            "label": "5",
+            "confidence": 0.9450618624687195,
+            "bbox": {
+              "x1": 40.26552963256836,
+              "y1": 59.3158073425293,
+              "x2": 55.21818542480469,
+              "y2": 85.7099609375
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "SB",
+        "matched_position": "SB",
+        "nearest_position": "SB",
+        "nearest_distance_px": 234.688,
+        "logical_position": "SB",
+        "logical_distance_px": 234.688
+      },
+      "BB": {
+        "raw_text": "1",
+        "amount_bb": 1.0,
+        "bbox": {
+          "x1": 1239.1728515625,
+          "y1": 827.71630859375,
+          "x2": 1326.73046875,
+          "y2": 932.587646484375
+        },
+        "digit_tokens": [
+          {
+            "label": "1",
+            "confidence": 0.9646466970443726,
+            "bbox": {
+              "x1": 17.909019470214844,
+              "y1": 67.80323791503906,
+              "x2": 29.629112243652344,
+              "y2": 94.30812072753906
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "BB",
+        "matched_position": "BB",
+        "nearest_position": "BB",
+        "nearest_distance_px": 232.823,
+        "logical_position": "BB",
+        "logical_distance_px": 232.823
+      }
+    },
+    "bets_by_position": {
+      "CO": {
+        "raw_text": "7.5",
+        "amount_bb": 7.5,
+        "bbox": {
+          "x1": 1237.662109375,
+          "y1": 377.3592529296875,
+          "x2": 1379.025634765625,
+          "y2": 474.621826171875
+        },
+        "digit_tokens": [
+          {
+            "label": "7",
+            "confidence": 0.970036506652832,
+            "bbox": {
+              "x1": 6.480477809906006,
+              "y1": 60.508724212646484,
+              "x2": 22.68225860595703,
+              "y2": 88.55252075195312
+            }
+          },
+          {
+            "label": ".",
+            "confidence": 0.8663029670715332,
+            "bbox": {
+              "x1": 23.35531997680664,
+              "y1": 79.7221450805664,
+              "x2": 30.578264236450195,
+              "y2": 87.8290023803711
+            }
+          },
+          {
+            "label": "5",
+            "confidence": 0.9488118886947632,
+            "bbox": {
+              "x1": 32.62418746948242,
+              "y1": 61.38249588012695,
+              "x2": 48.03028869628906,
+              "y2": 87.44857025146484
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "Chips",
+        "matched_position": "CO",
+        "street": "preflop",
+        "matched_among_live_positions_only": true,
+        "match_phase": "live_positions",
+        "candidate_positions": [
+          "CO",
+          "BB",
+          "UTG"
+        ],
+        "candidate_positions_live_only": [
+          "CO",
+          "BB",
+          "UTG"
+        ],
+        "candidate_positions_all_occupied": [
+          "CO",
+          "BTN",
+          "MP",
+          "SB",
+          "BB",
+          "UTG"
+        ],
+        "match_score_px": 84.438,
+        "match_details": {
+          "score": 84.43839328307139,
+          "target_distance_px": 53.82187290563057,
+          "seat_distance_px": 203.33800543021079,
+          "line_distance_px": 36.019435738165676,
+          "projection_ratio": 0.48339782233084844,
+          "outside_penalty_px": 0.0
+        },
+        "second_best_match_score_px": 648.54
+      },
+      "UTG": {
+        "raw_text": "3",
+        "amount_bb": 3.0,
+        "bbox": {
+          "x1": 726.0784912109375,
+          "y1": 758.0916748046875,
+          "x2": 854.0572509765625,
+          "y2": 867.3736572265625
+        },
+        "digit_tokens": [
+          {
+            "label": "3",
+            "confidence": 0.9736551642417908,
+            "bbox": {
+              "x1": 22.255645751953125,
+              "y1": 72.254150390625,
+              "x2": 37.34602737426758,
+              "y2": 99.2543716430664
+            }
+          }
+        ],
+        "warnings": [],
+        "source": "Chips",
+        "matched_position": "UTG",
+        "street": "preflop",
+        "matched_among_live_positions_only": true,
+        "match_phase": "live_positions",
+        "candidate_positions": [
+          "UTG",
+          "BB",
+          "CO"
+        ],
+        "candidate_positions_live_only": [
+          "UTG",
+          "BB",
+          "CO"
+        ],
+        "candidate_positions_all_occupied": [
+          "UTG",
+          "MP",
+          "BB",
+          "CO",
+          "SB",
+          "BTN"
+        ],
+        "match_score_px": 189.28,
+        "match_details": {
+          "score": 189.27992760890965,
+          "target_distance_px": 186.31779961119258,
+          "seat_distance_px": 259.0031808945904,
+          "line_distance_px": 3.4848564679024103,
+          "projection_ratio": 0.33734577417394984,
+          "outside_penalty_px": 0.0
+        },
+        "second_best_match_score_px": 889.195
+      }
+    },
+    "blind_diagnostics": {
+      "SB": {
+        "matched_position": "SB",
+        "amount_bb": 0.5,
+        "warnings": [],
+        "source": "SB",
+        "confirmed": true
+      },
+      "BB": {
+        "matched_position": "BB",
+        "amount_bb": 1.0,
+        "warnings": [],
+        "source": "BB",
+        "confirmed": true
+      }
+    },
+    "warnings": [],
+    "errors": []
+  },
+  "action_annotations": {
+    "actions_log": [
+      {
+        "order": 1,
+        "position": "UTG",
+        "pos": "UTG",
+        "street": "preflop",
+        "final_contribution_bb": 3.0,
+        "amount_bb": 3.0,
+        "semantic_action": "open_raise",
+        "engine_action": "raise",
+        "raise_level_after_action": 1,
+        "current_price_to_call_after_action": 3.0,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "OPEN",
+        "action_display": "OPEN 3.0"
+      },
+      {
+        "order": 2,
+        "position": "CO",
+        "pos": "CO",
+        "street": "preflop",
+        "final_contribution_bb": 7.5,
+        "amount_bb": 7.5,
+        "semantic_action": "3bet",
+        "engine_action": "raise",
+        "raise_level_after_action": 2,
+        "current_price_to_call_after_action": 7.5,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "RAISE",
+        "action_display": "RAISE 7.5"
+      }
+    ],
+    "last_actions_by_position": {
+      "UTG": "OPEN 3.0",
+      "CO": "RAISE 7.5"
+    }
+  },
+  "reconstructed_preflop": {
+    "street": "preflop",
+    "hero_position": "BB",
+    "node_type": "facing_3bet",
+    "opener_pos": "UTG",
+    "three_bettor_pos": "CO",
+    "four_bettor_pos": null,
+    "limpers": 0,
+    "callers": 0,
+    "action_history": [
+      {
+        "order": 1,
+        "position": "UTG",
+        "pos": "UTG",
+        "street": "preflop",
+        "final_contribution_bb": 3.0,
+        "amount_bb": 3.0,
+        "semantic_action": "open_raise",
+        "engine_action": "raise",
+        "raise_level_after_action": 1,
+        "current_price_to_call_after_action": 3.0,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "OPEN",
+        "action_display": "OPEN 3.0"
+      },
+      {
+        "order": 2,
+        "position": "CO",
+        "pos": "CO",
+        "street": "preflop",
+        "final_contribution_bb": 7.5,
+        "amount_bb": 7.5,
+        "semantic_action": "3bet",
+        "engine_action": "raise",
+        "raise_level_after_action": 2,
+        "current_price_to_call_after_action": 7.5,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "RAISE",
+        "action_display": "RAISE 7.5"
+      }
+    ],
+    "final_contribution_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 3.0,
+      "MP": 0.0,
+      "CO": 7.5
+    },
+    "same_hand_identity": false
+  },
+  "reconstructed_postflop": {
+    "street": "preflop",
+    "pot_before_hero": null,
+    "to_call": null,
+    "effective_stack": null,
+    "hero_position": null,
+    "villain_positions": [],
+    "line_context": {},
+    "action_history": [],
+    "final_contribution_street_bb_by_pos": {
+      "BTN": 0.0,
+      "SB": 0.5,
+      "BB": 1.0,
+      "UTG": 3.0,
+      "MP": 0.0,
+      "CO": 7.5
+    }
+  },
+  "advisor_input": {
+    "context_type": "PreflopContext",
+    "hero_hand": [
+      "Ks",
+      "4h"
+    ],
+    "hero_pos": "BB",
+    "node_type": "facing_3bet",
+    "range_owner": "hero",
+    "opener_pos": "UTG",
+    "three_bettor_pos": "CO",
+    "four_bettor_pos": null,
+    "limpers": 0,
+    "callers": 0,
+    "dead_cards": [],
+    "action_history": [
+      {
+        "order": 1,
+        "position": "UTG",
+        "pos": "UTG",
+        "street": "preflop",
+        "final_contribution_bb": 3.0,
+        "amount_bb": 3.0,
+        "semantic_action": "open_raise",
+        "engine_action": "raise",
+        "raise_level_after_action": 1,
+        "current_price_to_call_after_action": 3.0,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "OPEN",
+        "action_display": "OPEN 3.0"
+      },
+      {
+        "order": 2,
+        "position": "CO",
+        "pos": "CO",
+        "street": "preflop",
+        "final_contribution_bb": 7.5,
+        "amount_bb": 7.5,
+        "semantic_action": "3bet",
+        "engine_action": "raise",
+        "raise_level_after_action": 2,
+        "current_price_to_call_after_action": 7.5,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "RAISE",
+        "action_display": "RAISE 7.5"
+      }
+    ],
+    "meta": {
+      "source": "pokervision",
+      "hand_id": "hand_000004",
+      "hero_original_position": "BB",
+      "projection_source": "action_state_preview",
+      "actions_seen": [
+        {
+          "order": 1,
+          "position": "UTG",
+          "pos": "UTG",
+          "street": "preflop",
+          "final_contribution_bb": 3.0,
+          "amount_bb": 3.0,
+          "semantic_action": "open_raise",
+          "engine_action": "raise",
+          "raise_level_after_action": 1,
+          "current_price_to_call_after_action": 3.0,
+          "frame_id": "frame_0342",
+          "timestamp": "2026-04-09T18:00:23.168",
+          "action": "OPEN",
+          "action_display": "OPEN 3.0"
+        },
+        {
+          "order": 2,
+          "position": "CO",
+          "pos": "CO",
+          "street": "preflop",
+          "final_contribution_bb": 7.5,
+          "amount_bb": 7.5,
+          "semantic_action": "3bet",
+          "engine_action": "raise",
+          "raise_level_after_action": 2,
+          "current_price_to_call_after_action": 7.5,
+          "frame_id": "frame_0342",
+          "timestamp": "2026-04-09T18:00:23.168",
+          "action": "RAISE",
+          "action_display": "RAISE 7.5"
+        }
+      ]
+    }
+  },
+  "solver_input": {
+    "context_type": "PreflopContext",
+    "hero_hand": [
+      "Ks",
+      "4h"
+    ],
+    "hero_pos": "BB",
+    "node_type": "facing_3bet",
+    "range_owner": "hero",
+    "opener_pos": "UTG",
+    "three_bettor_pos": "CO",
+    "four_bettor_pos": null,
+    "limpers": 0,
+    "callers": 0,
+    "dead_cards": [],
+    "action_history": [
+      {
+        "order": 1,
+        "position": "UTG",
+        "pos": "UTG",
+        "street": "preflop",
+        "final_contribution_bb": 3.0,
+        "amount_bb": 3.0,
+        "semantic_action": "open_raise",
+        "engine_action": "raise",
+        "raise_level_after_action": 1,
+        "current_price_to_call_after_action": 3.0,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "OPEN",
+        "action_display": "OPEN 3.0"
+      },
+      {
+        "order": 2,
+        "position": "CO",
+        "pos": "CO",
+        "street": "preflop",
+        "final_contribution_bb": 7.5,
+        "amount_bb": 7.5,
+        "semantic_action": "3bet",
+        "engine_action": "raise",
+        "raise_level_after_action": 2,
+        "current_price_to_call_after_action": 7.5,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "RAISE",
+        "action_display": "RAISE 7.5"
+      }
+    ],
+    "meta": {
+      "source": "pokervision",
+      "hand_id": "hand_000004",
+      "hero_original_position": "BB",
+      "projection_source": "action_state_preview",
+      "actions_seen": [
+        {
+          "order": 1,
+          "position": "UTG",
+          "pos": "UTG",
+          "street": "preflop",
+          "final_contribution_bb": 3.0,
+          "amount_bb": 3.0,
+          "semantic_action": "open_raise",
+          "engine_action": "raise",
+          "raise_level_after_action": 1,
+          "current_price_to_call_after_action": 3.0,
+          "frame_id": "frame_0342",
+          "timestamp": "2026-04-09T18:00:23.168",
+          "action": "OPEN",
+          "action_display": "OPEN 3.0"
+        },
+        {
+          "order": 2,
+          "position": "CO",
+          "pos": "CO",
+          "street": "preflop",
+          "final_contribution_bb": 7.5,
+          "amount_bb": 7.5,
+          "semantic_action": "3bet",
+          "engine_action": "raise",
+          "raise_level_after_action": 2,
+          "current_price_to_call_after_action": 7.5,
+          "frame_id": "frame_0342",
+          "timestamp": "2026-04-09T18:00:23.168",
+          "action": "RAISE",
+          "action_display": "RAISE 7.5"
+        }
+      ]
+    }
+  },
+  "solver_output": {
+    "result": null,
+    "context_type": "PreflopContext"
+  },
+  "engine_result": {
+    "status": "solver_unavailable"
+  },
+  "solver_context": {
+    "context_type": "PreflopContext",
+    "hero_hand": [
+      "Ks",
+      "4h"
+    ],
+    "hero_pos": "BB",
+    "node_type": "facing_3bet",
+    "range_owner": "hero",
+    "opener_pos": "UTG",
+    "three_bettor_pos": "CO",
+    "four_bettor_pos": null,
+    "limpers": 0,
+    "callers": 0,
+    "dead_cards": [],
+    "action_history": [
+      {
+        "order": 1,
+        "position": "UTG",
+        "pos": "UTG",
+        "street": "preflop",
+        "final_contribution_bb": 3.0,
+        "amount_bb": 3.0,
+        "semantic_action": "open_raise",
+        "engine_action": "raise",
+        "raise_level_after_action": 1,
+        "current_price_to_call_after_action": 3.0,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "OPEN",
+        "action_display": "OPEN 3.0"
+      },
+      {
+        "order": 2,
+        "position": "CO",
+        "pos": "CO",
+        "street": "preflop",
+        "final_contribution_bb": 7.5,
+        "amount_bb": 7.5,
+        "semantic_action": "3bet",
+        "engine_action": "raise",
+        "raise_level_after_action": 2,
+        "current_price_to_call_after_action": 7.5,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "RAISE",
+        "action_display": "RAISE 7.5"
+      }
+    ],
+    "meta": {
+      "source": "pokervision",
+      "hand_id": "hand_000004",
+      "hero_original_position": "BB",
+      "projection_source": "action_state_preview",
+      "actions_seen": [
+        {
+          "order": 1,
+          "position": "UTG",
+          "pos": "UTG",
+          "street": "preflop",
+          "final_contribution_bb": 3.0,
+          "amount_bb": 3.0,
+          "semantic_action": "open_raise",
+          "engine_action": "raise",
+          "raise_level_after_action": 1,
+          "current_price_to_call_after_action": 3.0,
+          "frame_id": "frame_0342",
+          "timestamp": "2026-04-09T18:00:23.168",
+          "action": "OPEN",
+          "action_display": "OPEN 3.0"
+        },
+        {
+          "order": 2,
+          "position": "CO",
+          "pos": "CO",
+          "street": "preflop",
+          "final_contribution_bb": 7.5,
+          "amount_bb": 7.5,
+          "semantic_action": "3bet",
+          "engine_action": "raise",
+          "raise_level_after_action": 2,
+          "current_price_to_call_after_action": 7.5,
+          "frame_id": "frame_0342",
+          "timestamp": "2026-04-09T18:00:23.168",
+          "action": "RAISE",
+          "action_display": "RAISE 7.5"
+        }
+      ]
+    }
+  },
+  "solver_status": "solver_unavailable",
+  "solver_warnings": [
+    "Неизвестный node_type: facing_3bet"
+  ],
+  "solver_errors": [],
+  "hero_decision_debug": {
+    "status": "solver_unavailable",
+    "type": "NoneType",
+    "raw_repr": "",
+    "source": null,
+    "confidence": null,
+    "reason": null,
+    "preflop": null,
+    "postflop": null,
+    "warnings": [
+      "Неизвестный node_type: facing_3bet"
+    ]
+  },
+  "solver_fingerprint": "9cddb59a4ab091b00888d39027912ba944c168b1",
+  "solver_result_reused": false,
+  "solver_reuse_reason": null,
+  "solver_run_frame_id": null,
+  "solver_run_timestamp": null,
+  "recommended_action": "",
+  "recommended_amount_to": null,
+  "recommended_size_pct": null,
+  "node_type": "facing_3bet",
+  "engine_status": "solver_unavailable",
+  "analysis_panel": {
+    "street": "preflop",
+    "context_type": "PreflopContext",
+    "node_type": "facing_3bet",
+    "hero_position": "BB",
+    "villain_positions": [],
+    "player_count": 6,
+    "action_history": [
+      {
+        "order": 1,
+        "position": "UTG",
+        "pos": "UTG",
+        "street": "preflop",
+        "final_contribution_bb": 3.0,
+        "amount_bb": 3.0,
+        "semantic_action": "open_raise",
+        "engine_action": "raise",
+        "raise_level_after_action": 1,
+        "current_price_to_call_after_action": 3.0,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "OPEN",
+        "action_display": "OPEN 3.0"
+      },
+      {
+        "order": 2,
+        "position": "CO",
+        "pos": "CO",
+        "street": "preflop",
+        "final_contribution_bb": 7.5,
+        "amount_bb": 7.5,
+        "semantic_action": "3bet",
+        "engine_action": "raise",
+        "raise_level_after_action": 2,
+        "current_price_to_call_after_action": 7.5,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "RAISE",
+        "action_display": "RAISE 7.5"
+      }
+    ],
+    "reconstructed_action_history": [
+      {
+        "order": 1,
+        "position": "UTG",
+        "pos": "UTG",
+        "street": "preflop",
+        "final_contribution_bb": 3.0,
+        "amount_bb": 3.0,
+        "semantic_action": "open_raise",
+        "engine_action": "raise",
+        "raise_level_after_action": 1,
+        "current_price_to_call_after_action": 3.0,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "OPEN",
+        "action_display": "OPEN 3.0"
+      },
+      {
+        "order": 2,
+        "position": "CO",
+        "pos": "CO",
+        "street": "preflop",
+        "final_contribution_bb": 7.5,
+        "amount_bb": 7.5,
+        "semantic_action": "3bet",
+        "engine_action": "raise",
+        "raise_level_after_action": 2,
+        "current_price_to_call_after_action": 7.5,
+        "frame_id": "frame_0342",
+        "timestamp": "2026-04-09T18:00:23.168",
+        "action": "RAISE",
+        "action_display": "RAISE 7.5"
+      }
+    ],
+    "recommended_action": "",
+    "recommended_amount_to": null,
+    "recommended_size_pct": null,
+    "decision_reason": null,
+    "decision_confidence": null,
+    "engine_status": "solver_unavailable",
+    "solver_status": "solver_unavailable",
+    "solver_reused": false,
+    "solver_reuse_reason": null,
+    "solver_fingerprint": "9cddb59a4ab091b00888d39027912ba944c168b1",
+    "solver_warnings": [
+      "Неизвестный node_type: facing_3bet"
+    ],
+    "solver_errors": [],
+    "range_debug": {},
+    "hero_decision_debug": {
+      "status": "solver_unavailable",
+      "type": "NoneType",
+      "raw_repr": "",
+      "source": null,
+      "confidence": null,
+      "reason": null,
+      "preflop": null,
+      "postflop": null,
+      "warnings": [
+        "Неизвестный node_type: facing_3bet"
+      ]
+    }
+  }
+}
