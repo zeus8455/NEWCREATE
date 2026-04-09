@@ -35,6 +35,31 @@ def _build_legacy_solver_annotation(hand: HandState) -> dict:
     return result
 
 
+def _derive_solver_ui_fields(hand: HandState) -> dict:
+    engine_result = hand.engine_result or {}
+    advisor_input = hand.advisor_input or {}
+    solver_input = hand.solver_input or {}
+    solver_context = hand.solver_context or {}
+    action_raw = engine_result.get("engine_action")
+    recommended_action = str(action_raw).upper() if action_raw else None
+    amount_to = engine_result.get("amount_to")
+    size_pct = engine_result.get("size_pct")
+    node_type = (
+        str(advisor_input.get("node_type") or "").strip()
+        or str(solver_input.get("node_type") or "").strip()
+        or str(solver_context.get("node_type") or "").strip()
+        or str((hand.action_state or {}).get("node_type_preview") or "").strip()
+    )
+    engine_status = str(engine_result.get("status") or hand.solver_status or "not_run")
+    return {
+        "recommended_action": recommended_action,
+        "recommended_amount_to": amount_to,
+        "recommended_size_pct": size_pct,
+        "node_type": node_type,
+        "engine_status": engine_status,
+    }
+
+
 def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: str) -> RenderState:
     players = {}
     action_state = hand.action_state or {}
@@ -88,6 +113,7 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         warnings.append(hand.conflict_state)
 
     solver_summary = _build_legacy_solver_annotation(hand)
+    solver_ui = _derive_solver_ui_fields(hand)
 
     return RenderState(
         hand_id=hand.hand_id,
@@ -113,9 +139,16 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
             "solver_bridge": solver_summary,
         },
         advisor_input=dict(hand.advisor_input),
+        solver_input=dict(hand.solver_input),
+        solver_output=dict(hand.solver_output),
         engine_result=dict(hand.engine_result),
         solver_context=dict(hand.solver_context),
         solver_status=hand.solver_status,
         solver_errors=list(hand.solver_errors),
         hero_decision_debug=dict(hand.hero_decision_debug),
+        recommended_action=solver_ui["recommended_action"],
+        recommended_amount_to=solver_ui["recommended_amount_to"],
+        recommended_size_pct=solver_ui["recommended_size_pct"],
+        node_type=solver_ui["node_type"],
+        engine_status=solver_ui["engine_status"],
     )

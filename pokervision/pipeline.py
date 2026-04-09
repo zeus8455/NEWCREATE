@@ -163,6 +163,23 @@ def _build_advisor_input_fallback(analysis: FrameAnalysis, hand: HandState, solv
     }
 
 
+def _get_solver_input_payload(payload: Any, solver_context: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("solver_input"), dict):
+        return _safe_jsonable(payload.get("solver_input"))
+    return dict(solver_context)
+
+
+def _get_solver_output_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("solver_output"), dict):
+        return _safe_jsonable(payload.get("solver_output"))
+    if isinstance(payload, dict) and payload.get("result") is not None:
+        return {
+            "result": _safe_jsonable(payload.get("result")),
+            "context_type": payload.get("context_type"),
+        }
+    return {}
+
+
 def _get_solver_context_payload(analysis: FrameAnalysis, hand: HandState, payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict) and isinstance(payload.get("solver_context"), dict):
         return _safe_jsonable(payload.get("solver_context"))
@@ -230,6 +247,8 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
         status = "not_run"
 
     solver_context = _get_solver_context_payload(analysis, hand, payload)
+    solver_input = _get_solver_input_payload(payload, solver_context)
+    solver_output = _get_solver_output_payload(payload)
     advisor_input = _get_advisor_input_payload(analysis, hand, payload, solver_context)
     if isinstance(payload, dict) and payload.get("warnings"):
         errors.extend([str(item) for item in payload.get("warnings", [])])
@@ -243,6 +262,8 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
 
     hand.solver_context = dict(solver_context)
     hand.advisor_input = dict(advisor_input)
+    hand.solver_input = dict(solver_input)
+    hand.solver_output = dict(solver_output)
     hand.engine_result = dict(engine_result)
     hand.solver_status = status
     hand.solver_errors = list(errors)

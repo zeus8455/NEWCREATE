@@ -238,6 +238,8 @@ class HandState:
     actions_log: List[Dict[str, Any]] = field(default_factory=list)
     # Stable solver-layer state. These fields replace ad-hoc solver dict storage.
     advisor_input: Dict[str, Any] = field(default_factory=dict)
+    solver_input: Dict[str, Any] = field(default_factory=dict)
+    solver_output: Dict[str, Any] = field(default_factory=dict)
     engine_result: Dict[str, Any] = field(default_factory=dict)
     solver_context: Dict[str, Any] = field(default_factory=dict)
     solver_status: str = "not_run"
@@ -273,6 +275,8 @@ class HandState:
             "action_state": dict(self.action_state),
             "actions_log": list(self.actions_log),
             "advisor_input": dict(self.advisor_input),
+            "solver_input": dict(self.solver_input),
+            "solver_output": dict(self.solver_output),
             "engine_result": dict(self.engine_result),
             "solver_context": dict(self.solver_context),
             "solver_status": self.solver_status,
@@ -302,11 +306,18 @@ class RenderState:
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_annotations: Dict[str, Any] = field(default_factory=dict)
     advisor_input: Dict[str, Any] = field(default_factory=dict)
+    solver_input: Dict[str, Any] = field(default_factory=dict)
+    solver_output: Dict[str, Any] = field(default_factory=dict)
     engine_result: Dict[str, Any] = field(default_factory=dict)
     solver_context: Dict[str, Any] = field(default_factory=dict)
     solver_status: str = "not_run"
     solver_errors: List[str] = field(default_factory=list)
     hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
+    recommended_action: Optional[str] = None
+    recommended_amount_to: Optional[float] = None
+    recommended_size_pct: Optional[float] = None
+    node_type: str = ""
+    engine_status: str = "not_run"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

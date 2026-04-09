@@ -871,6 +871,8 @@ class EngineBridge:
             "context_type": "PreflopContext",
             "solver_context": dict(contract_payload),
             "advisor_input": dict(contract_payload),
+            "solver_input": dict(contract_payload),
+            "solver_output": {"result": _serialize_for_payload(result), "context_type": "PreflopContext"},
             "projection_meta": _serialize_for_payload(getattr(context, "meta", {})),
             "result": result,
         }
@@ -970,6 +972,8 @@ class EngineBridge:
             "context_type": "PostflopContext",
             "solver_context": dict(contract_payload),
             "advisor_input": dict(contract_payload),
+            "solver_input": dict(contract_payload),
+            "solver_output": {"result": _serialize_for_payload(result), "context_type": "PostflopContext"},
             "projection_meta": _serialize_for_payload(getattr(context, "meta", {})),
             "result": result,
         }
