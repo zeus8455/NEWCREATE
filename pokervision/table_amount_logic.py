@@ -88,6 +88,69 @@ def _candidate_positions(
     return live or names
 
 
+def _occupied_positions(positions: Dict[str, Dict[str, object]]) -> List[str]:
+    return list(positions.keys())
+
+
+def _score_chip_candidates(
+    region_center: Point,
+    candidate_names: List[str],
+    position_centers: Dict[str, Point],
+    table_center: Point | None,
+    settings,
+) -> List[Tuple[str, float, Dict[str, float]]]:
+    scored: List[Tuple[str, float, Dict[str, float]]] = []
+    for pos_name in candidate_names:
+        pos_center = position_centers[pos_name]
+        if table_center is None:
+            seat_dist = _distance(region_center, pos_center)
+            scored.append((pos_name, seat_dist, {
+                "score": seat_dist,
+                "target_distance_px": seat_dist,
+                "seat_distance_px": seat_dist,
+                "line_distance_px": seat_dist,
+                "projection_ratio": 0.0,
+                "outside_penalty_px": 0.0,
+            }))
+        else:
+            score, meta = _chips_match_score(region_center, pos_center, table_center, settings)
+            scored.append((pos_name, score, meta))
+    scored.sort(key=lambda item: item[1])
+    return scored
+
+
+def _chip_match_status(
+    scored: List[Tuple[str, float, Dict[str, float]]],
+    settings,
+) -> tuple[str | None, float | None, Dict[str, float] | None, float | None, str | None]:
+    if not scored:
+        return None, None, None, None, "no_candidates"
+    best_pos, best_score, best_meta = scored[0]
+    second_score = scored[1][1] if len(scored) > 1 else None
+    if best_score > settings.chips_to_position_max_distance_px:
+        return best_pos, best_score, best_meta, second_score, "too_far"
+    if second_score is not None and abs(second_score - best_score) <= settings.chips_ambiguity_margin_px:
+        return best_pos, best_score, best_meta, second_score, "ambiguous"
+    return best_pos, best_score, best_meta, second_score, None
+
+
+def _is_folded_position(
+    player_states: Dict[str, Dict[str, object]] | None,
+    position: str,
+) -> bool:
+    return bool((player_states or {}).get(position, {}).get("is_fold", False))
+
+
+def _folded_override_margin_px(settings) -> float:
+    return float(
+        getattr(
+            settings,
+            "chips_folded_override_margin_px",
+            max(float(getattr(settings, "chips_ambiguity_margin_px", 40.0)) * 2.0, 35.0),
+        )
+    )
+
+
 
 def _logical_blind_position(blind_label: str, positions: Dict[str, Dict[str, object]]) -> str | None:
     if blind_label == "BB":
@@ -226,52 +289,108 @@ def build_table_amount_state(
                 state.unassigned_chips.append(entry)
                 continue
 
-            candidate_names = [name for name in live_positions if name in position_centers]
-            if not candidate_names:
-                candidate_names = list(position_centers.keys())
-            if not candidate_names:
+            live_candidate_names = [name for name in live_positions if name in position_centers]
+            occupied_candidate_names = [name for name in _occupied_positions(positions) if name in position_centers]
+            if not live_candidate_names:
+                live_candidate_names = list(position_centers.keys())
+            if not occupied_candidate_names:
+                occupied_candidate_names = list(position_centers.keys())
+            if not occupied_candidate_names:
                 entry.setdefault("warnings", []).append("No logical positions available for chips matching")
                 state.unassigned_chips.append(entry)
                 continue
 
-            scored: List[Tuple[str, float, Dict[str, float]]] = []
-            for pos_name in candidate_names:
-                pos_center = position_centers[pos_name]
-                if table_center is None:
-                    seat_dist = _distance(region_center, pos_center)
-                    scored.append((pos_name, seat_dist, {
-                        "score": seat_dist,
-                        "target_distance_px": seat_dist,
-                        "seat_distance_px": seat_dist,
-                        "line_distance_px": seat_dist,
-                        "projection_ratio": 0.0,
-                        "outside_penalty_px": 0.0,
-                    }))
-                else:
-                    score, meta = _chips_match_score(region_center, pos_center, table_center, settings)
-                    scored.append((pos_name, score, meta))
-            scored.sort(key=lambda item: item[1])
+            live_scored = _score_chip_candidates(region_center, live_candidate_names, position_centers, table_center, settings)
+            live_best_pos, live_best_score, live_best_meta, live_second_score, live_rejection = _chip_match_status(live_scored, settings)
 
-            best_pos, best_score, best_meta = scored[0]
-            second_score = scored[1][1] if len(scored) > 1 else None
-            entry["matched_position"] = best_pos
-            entry["match_score_px"] = round(best_score, 3)
-            entry["match_details"] = best_meta
-            entry["candidate_positions"] = [name for name, _, _ in scored]
+            occupied_scored: List[Tuple[str, float, Dict[str, float]]] = []
+            occupied_best_pos = None
+            occupied_best_score = None
+            occupied_best_meta = None
+            occupied_second_score = None
+            occupied_rejection = None
+            if street == "preflop" and player_states:
+                # CRITICAL INVARIANT:
+                # On preflop, Chips matching must NOT be restricted to live / non-folded
+                # players only. A player can already be folded in the current frame while
+                # their historical preflop contribution is still visible on the table.
+                # If live-only matching is restored here, spots like
+                # open -> flat -> squeeze/3bet -> opener folds will lose prior
+                # contributions and preflop reconstruction will become false again.
+                occupied_scored = _score_chip_candidates(region_center, occupied_candidate_names, position_centers, table_center, settings)
+                occupied_best_pos, occupied_best_score, occupied_best_meta, occupied_second_score, occupied_rejection = _chip_match_status(occupied_scored, settings)
+
+            chosen_pos = live_best_pos
+            chosen_score = live_best_score
+            chosen_meta = live_best_meta
+            chosen_second_score = live_second_score
+            chosen_rejection = live_rejection
+            chosen_phase = "live_positions"
+            matched_live_only = bool(player_states)
+
+            if occupied_scored and occupied_best_pos is not None and occupied_rejection is None:
+                override_margin = _folded_override_margin_px(settings)
+                occupied_is_folded = _is_folded_position(player_states, occupied_best_pos)
+                live_missing_or_rejected = live_best_pos is None or live_rejection is not None
+                folded_override = False
+                if occupied_is_folded:
+                    if live_missing_or_rejected:
+                        folded_override = True
+                    elif live_best_pos != occupied_best_pos and live_best_score is not None and occupied_best_score is not None:
+                        folded_override = (occupied_best_score + override_margin) < live_best_score
+                if folded_override:
+                    chosen_pos = occupied_best_pos
+                    chosen_score = occupied_best_score
+                    chosen_meta = occupied_best_meta
+                    chosen_second_score = occupied_second_score
+                    chosen_rejection = None
+                    chosen_phase = "occupied_positions_fallback"
+                    matched_live_only = False
+                    entry.setdefault("warnings", []).append("matched_to_folded_position_as_residual_preflop_contribution")
+                    if live_rejection is not None:
+                        entry.setdefault("warnings", []).append(
+                            f"Live-only chips matching fallback used: {live_rejection}"
+                        )
+                    else:
+                        entry.setdefault("warnings", []).append(
+                            "Folded-position residual override used on preflop"
+                        )
+
+            entry["matched_position"] = chosen_pos
             entry["street"] = street
-            entry["matched_among_live_positions_only"] = bool(player_states)
+            entry["matched_among_live_positions_only"] = matched_live_only
+            entry["match_phase"] = chosen_phase
+            entry["candidate_positions"] = [name for name, _, _ in (live_scored if matched_live_only else occupied_scored or live_scored)]
+            if live_scored:
+                entry["candidate_positions_live_only"] = [name for name, _, _ in live_scored]
+            if occupied_scored:
+                entry["candidate_positions_all_occupied"] = [name for name, _, _ in occupied_scored]
 
-            if best_score > settings.chips_to_position_max_distance_px:
+            if chosen_score is not None:
+                entry["match_score_px"] = round(chosen_score, 3)
+            if chosen_meta is not None:
+                entry["match_details"] = chosen_meta
+
+            if chosen_rejection == "too_far":
                 entry.setdefault("warnings", []).append("Chips too far from any logical betting lane")
                 state.unassigned_chips.append(entry)
                 continue
-            if second_score is not None and abs(second_score - best_score) <= settings.chips_ambiguity_margin_px:
+            if chosen_rejection == "ambiguous":
                 entry.setdefault("warnings", []).append("Chips ambiguous between two positions")
-                entry["second_best_match_score_px"] = round(second_score, 3)
+                if chosen_second_score is not None:
+                    entry["second_best_match_score_px"] = round(chosen_second_score, 3)
                 state.unassigned_chips.append(entry)
                 continue
 
-            state.bets_by_position[best_pos] = entry
+            if chosen_pos is None:
+                entry.setdefault("warnings", []).append("No confident chips match found")
+                state.unassigned_chips.append(entry)
+                continue
+
+            if chosen_second_score is not None and chosen_phase != "occupied_positions_fallback":
+                entry["second_best_match_score_px"] = round(chosen_second_score, 3)
+
+            state.bets_by_position[chosen_pos] = entry
 
     state.warnings.extend(warnings)
     state.errors.extend(errors)

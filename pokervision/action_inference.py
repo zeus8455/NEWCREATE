@@ -99,6 +99,18 @@ def _legacy_last_action_display(event: Dict[str, Any]) -> str:
     return str(decorated.get("action_display") or decorated.get("action") or "")
 
 
+def _final_aggression_label(raise_level: int) -> Optional[str]:
+    if raise_level <= 0:
+        return None
+    if raise_level == 1:
+        return "open_raise"
+    if raise_level == 2:
+        return "3bet"
+    if raise_level == 3:
+        return "4bet"
+    return "5bet_or_more"
+
+
 def _player_is_folded(player_states: Dict[str, Dict[str, object]], position: str) -> bool:
     return bool((player_states or {}).get(position, {}).get("is_fold", False))
 
@@ -134,6 +146,13 @@ def get_street_actor_order(
 
     if street == "preflop":
         ordered = [pos for pos in PREFLOP_ORDER.get(player_count, ring) if pos in ring]
+        # CRITICAL INVARIANT:
+        # Preflop reconstruction is historical, not purely live-state based.
+        # A position that is folded in the current frame but still has money
+        # committed on the table must remain eligible for actor order and
+        # action reconstruction. Otherwise lines like
+        # open -> flat -> squeeze/3bet -> opener folds collapse into a false
+        # shorter history because the earlier contributor disappears too early.
         return [
             pos
             for pos in ordered
@@ -381,6 +400,39 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         last_actions_by_position[position] = _legacy_last_action_display(step)
         acted_positions.append(position)
 
+    terminal_actions: List[Dict[str, Any]] = []
+    final_aggression = _final_aggression_label(raise_level)
+    if final_aggression is not None and current_price_to_call > EPS:
+        for position in actor_order:
+            if not _player_is_folded(player_states, position):
+                continue
+            amount = contributions.get(position, 0.0)
+            forced_amount = forced.get(position, 0.0)
+            if amount <= forced_amount + EPS:
+                continue
+            if amount >= current_price_to_call - EPS:
+                continue
+            prior_action = next((step for step in reversed(action_history) if step.get("position") == position), None)
+            fold_event = _decorate_legacy_action_fields({
+                "order": len(action_history) + len(terminal_actions) + 1,
+                "position": position,
+                "pos": position,
+                "street": "preflop",
+                "semantic_action": "fold",
+                "engine_action": "fold",
+                "amount_bb": None,
+                "final_contribution_bb": round(amount, 4),
+                "facing_price_to_call_bb": round(current_price_to_call, 4),
+                "facing_aggression": final_aggression,
+                "inferred_terminal_action": True,
+                "reason": "folded_with_residual_preflop_contribution_below_final_price",
+                "prior_semantic_action": prior_action.get("semantic_action") if prior_action else None,
+                "frame_id": getattr(analysis, "frame_id", None),
+                "timestamp": getattr(analysis, "timestamp", None),
+            })
+            terminal_actions.append(fold_event)
+            last_actions_by_position[position] = _legacy_last_action_display(fold_event)
+
     node_type_preview = _derive_node_type_preview(
         hero_position=hero_position,
         player_count=player_count,
@@ -401,18 +453,19 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         "last_aggressor_position": four_bettor_pos or three_bettor_pos or opener_pos,
         "acted_positions": list(acted_positions),
         "last_actions_by_position": dict(last_actions_by_position),
-        "actions_this_frame": [_decorate_legacy_action_fields(item) for item in action_history],
-        "action_history": [_decorate_legacy_action_fields(item) for item in action_history],
+        "actions_this_frame": [_decorate_legacy_action_fields(item) for item in [*action_history, *terminal_actions]],
+        "action_history": [_decorate_legacy_action_fields(item) for item in [*action_history, *terminal_actions]],
+        "historical_terminal_actions": [_decorate_legacy_action_fields(item) for item in terminal_actions],
         "final_contribution_bb_by_pos": {
             pos: round(value, 4) for pos, value in contributions.items()
         },
         "final_contribution_street_bb_by_pos": {
             pos: round(value, 4) for pos, value in street_contribs.items()
         },
-        "semantic_action": action_history[-1]["semantic_action"] if action_history else None,
-        "engine_action": action_history[-1]["engine_action"] if action_history else None,
-        "raise_level_after_action": action_history[-1]["raise_level_after_action"] if action_history else 0,
-        "current_price_to_call_after_action": action_history[-1]["current_price_to_call_after_action"] if action_history else round(current_price_to_call, 4),
+        "semantic_action": ([*action_history, *terminal_actions][-1]["semantic_action"] if [*action_history, *terminal_actions] else None),
+        "engine_action": ([*action_history, *terminal_actions][-1].get("engine_action") if [*action_history, *terminal_actions] else None),
+        "raise_level_after_action": (action_history[-1]["raise_level_after_action"] if action_history else 0),
+        "current_price_to_call_after_action": (action_history[-1]["current_price_to_call_after_action"] if action_history else round(current_price_to_call, 4)),
         "limpers": list(limpers),
         "limpers_count": len(limpers),
         "opener_pos": opener_pos,
