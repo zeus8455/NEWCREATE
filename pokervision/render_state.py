@@ -1,7 +1,20 @@
+
 from __future__ import annotations
 
 from .action_inference import CANONICAL_RING
-from .models import HandState, RenderState
+from .models import (
+    HandState,
+    RenderState,
+    _compute_engine_status,
+    _compute_node_type,
+    _compute_recommended_action,
+    _compute_recommended_amount_to,
+    _compute_recommended_size_pct,
+    derive_amount_state,
+    derive_analysis_panel,
+    derive_reconstructed_postflop,
+    derive_reconstructed_preflop,
+)
 
 
 def _build_display_seat_order(hand: HandState) -> list[str]:
@@ -15,91 +28,40 @@ def _build_display_seat_order(hand: HandState) -> list[str]:
     return available
 
 
-def _clear_legacy_solver_annotation(action_annotations: dict) -> dict:
-    """Remove deprecated duplicated solver payload from action annotations.
-
-    CRITICAL INVARIANT:
-    Solver state in RenderState must have a single canonical location: the
-    dedicated top-level fields (advisor_input / solver_input / solver_output /
-    engine_result / solver_context / solver_status / solver_warnings /
-    solver_errors / hero_decision_debug).
-
-    Do not re-introduce action_annotations["solver_bridge"] here. It was a
-    temporary migration shim and caused the same solver payload to live in two
-    parallel JSON contracts.
-    """
-    if not isinstance(action_annotations, dict):
-        return {}
-    cleaned = dict(action_annotations)
-    cleaned.pop("solver_bridge", None)
-    return cleaned
-
-
-def _derive_solver_ui_fields(hand: HandState) -> dict:
-    engine_result = hand.engine_result or {}
-    advisor_input = hand.advisor_input or {}
-    solver_input = hand.solver_input or {}
-    solver_context = hand.solver_context or {}
-    action_raw = engine_result.get("engine_action")
-    recommended_action = str(action_raw).upper() if action_raw else None
-    amount_to = engine_result.get("amount_to")
-    size_pct = engine_result.get("size_pct")
-    node_type = (
-        str(advisor_input.get("node_type") or "").strip()
-        or str(solver_input.get("node_type") or "").strip()
-        or str(solver_context.get("node_type") or "").strip()
-        or str((hand.action_state or {}).get("node_type_preview") or "").strip()
-    )
-    engine_status = str(engine_result.get("status") or hand.solver_status or "not_run")
-    return {
-        "recommended_action": recommended_action,
-        "recommended_amount_to": amount_to,
-        "recommended_size_pct": size_pct,
-        "node_type": node_type,
-        "engine_status": engine_status,
-    }
-
-
 def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: str) -> RenderState:
-    players = {}
+    players: dict[str, dict] = {}
     action_state = hand.action_state or {}
     last_actions = dict(action_state.get("last_actions_by_position", {}))
     bet_map = (hand.table_amount_state or {}).get("bets_by_position", {}) if isinstance(hand.table_amount_state, dict) else {}
-    amount_norm = hand.amount_normalization or {}
-    normalized_street = (
-        amount_norm.get("final_contribution_street_bb_by_pos", {})
-        if isinstance(amount_norm, dict)
-        else {}
-    )
     seat_order = _build_display_seat_order(hand)
 
     for position in hand.occupied_positions:
         player_state = hand.player_states.get(position, {})
-        is_fold = player_state.get("is_fold", False)
+        is_fold = bool(player_state.get("is_fold", False))
         is_hero = position == hand.hero_position
         bet_payload = bet_map.get(position, {}) if isinstance(bet_map, dict) else {}
-        normalized_bet = normalized_street.get(position) if isinstance(normalized_street, dict) else None
         players[position] = {
             "position": position,
             "occupied": True,
             "is_hero": is_hero,
             "is_button": position == "BTN",
             "is_fold": is_fold,
-            "is_all_in": player_state.get("is_all_in", False),
-            "is_active": player_state.get("is_active", not is_fold),
+            "is_all_in": bool(player_state.get("is_all_in", False)),
+            "is_active": bool(player_state.get("is_active", not is_fold)),
             "stack_bb": player_state.get("stack_bb"),
             "stack_text_raw": player_state.get("stack_text_raw", ""),
             "state_warnings": list(player_state.get("warnings", [])),
             "cards_visible": is_hero and not is_fold,
             "show_card_backs": (not is_hero) and (not is_fold),
-            "current_bet_bb": bet_payload.get("amount_bb") if bet_payload.get("amount_bb") is not None else normalized_bet,
+            "current_bet_bb": bet_payload.get("amount_bb", 0.0),
             "current_bet_raw": bet_payload.get("raw_text", ""),
             "last_action": last_actions.get(position),
         }
 
-    street = hand.street_state.get("current_street", "preflop")
+    street = str(hand.street_state.get("current_street", "preflop"))
     freshness = "live"
-    warnings = []
+    warnings: list[str] = []
+
     if hand.status == "stale":
         freshness = "stale"
         warnings.append("State is stale")
@@ -109,10 +71,37 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
     elif hand.status == "error":
         freshness = "error"
         warnings.append("State is error")
-    if hand.conflict_state:
-        warnings.append(hand.conflict_state)
 
-    solver_ui = _derive_solver_ui_fields(hand)
+    if hand.conflict_state:
+        warnings.append(str(hand.conflict_state))
+
+    reconstructed_preflop = hand.reconstructed_preflop or derive_reconstructed_preflop(
+        hand.action_state,
+        hero_position=hand.hero_position,
+    )
+    reconstructed_postflop = hand.reconstructed_postflop or derive_reconstructed_postflop(
+        street=street,
+        action_state=hand.action_state,
+        advisor_input=hand.advisor_input,
+    )
+
+    analysis_panel = derive_analysis_panel(
+        street=street,
+        hero_position=hand.hero_position,
+        occupied_positions=hand.occupied_positions,
+        action_state=hand.action_state,
+        advisor_input=hand.advisor_input,
+        solver_input=hand.solver_input,
+        solver_output=hand.solver_output,
+        engine_result=hand.engine_result,
+        hero_decision_debug=hand.hero_decision_debug,
+        solver_status=hand.solver_status,
+        solver_warnings=hand.solver_warnings,
+        solver_errors=hand.solver_errors,
+        solver_result_reused=hand.solver_result_reused,
+        solver_reuse_reason=hand.solver_reuse_reason,
+        solver_fingerprint=hand.solver_fingerprint,
+    )
 
     return RenderState(
         hand_id=hand.hand_id,
@@ -132,10 +121,13 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         seat_order=seat_order,
         table_amount_state=dict(hand.table_amount_state),
         amount_normalization=dict(hand.amount_normalization),
-        action_annotations=_clear_legacy_solver_annotation({
+        amount_state=derive_amount_state(hand.table_amount_state, hand.amount_normalization),
+        action_annotations={
             "actions_log": list(hand.actions_log[-12:]),
             "last_actions_by_position": last_actions,
-        }),
+        },
+        reconstructed_preflop=reconstructed_preflop,
+        reconstructed_postflop=reconstructed_postflop,
         advisor_input=dict(hand.advisor_input),
         solver_input=dict(hand.solver_input),
         solver_output=dict(hand.solver_output),
@@ -145,14 +137,15 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         solver_warnings=list(hand.solver_warnings),
         solver_errors=list(hand.solver_errors),
         hero_decision_debug=dict(hand.hero_decision_debug),
-        solver_fingerprint=str(hand.solver_fingerprint or ""),
+        solver_fingerprint=hand.solver_fingerprint,
         solver_result_reused=bool(hand.solver_result_reused),
         solver_reuse_reason=hand.solver_reuse_reason,
         solver_run_frame_id=hand.solver_run_frame_id,
         solver_run_timestamp=hand.solver_run_timestamp,
-        recommended_action=solver_ui["recommended_action"],
-        recommended_amount_to=solver_ui["recommended_amount_to"],
-        recommended_size_pct=solver_ui["recommended_size_pct"],
-        node_type=solver_ui["node_type"],
-        engine_status=solver_ui["engine_status"],
+        recommended_action=_compute_recommended_action(hand.engine_result, hand.solver_output),
+        recommended_amount_to=_compute_recommended_amount_to(hand.engine_result, hand.solver_output),
+        recommended_size_pct=_compute_recommended_size_pct(hand.engine_result, hand.solver_output),
+        node_type=_compute_node_type(hand.action_state, hand.advisor_input),
+        engine_status=_compute_engine_status(hand.engine_result, hand.solver_status),
+        analysis_panel=analysis_panel,
     )

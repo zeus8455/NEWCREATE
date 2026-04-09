@@ -1,8 +1,205 @@
+
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+
+def _copy_dict(value: Any) -> Dict[str, Any]:
+    return deepcopy(value) if isinstance(value, dict) else {}
+
+
+def _copy_list(value: Any) -> List[Any]:
+    return deepcopy(value) if isinstance(value, list) else []
+
+
+def _trim_float(value: Any) -> Any:
+    if isinstance(value, float):
+        rounded = round(value, 4)
+        if rounded.is_integer():
+            return int(rounded)
+        return rounded
+    return value
+
+
+def derive_amount_state(
+    table_amount_state: Optional[Dict[str, Any]],
+    amount_normalization: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    table_amount_state = table_amount_state or {}
+    amount_normalization = amount_normalization or {}
+    return {
+        "street": amount_normalization.get("street"),
+        "total_pot_bb": amount_normalization.get("total_pot_bb"),
+        "forced_blinds_by_position": _copy_dict(amount_normalization.get("forced_blinds_by_position")),
+        "visible_bets_by_position": _copy_dict(amount_normalization.get("visible_bets_by_position")),
+        "final_contribution_bb_by_pos": _copy_dict(amount_normalization.get("final_contribution_bb_by_pos")),
+        "final_contribution_street_bb_by_pos": _copy_dict(amount_normalization.get("final_contribution_street_bb_by_pos")),
+        "posted_blinds": _copy_dict(table_amount_state.get("posted_blinds")),
+        "bets_by_position": _copy_dict(table_amount_state.get("bets_by_position")),
+        "blind_diagnostics": _copy_dict(amount_normalization.get("blind_diagnostics")),
+        "warnings": [
+            *[str(item) for item in table_amount_state.get("warnings", [])],
+            *[str(item) for item in amount_normalization.get("warnings", [])],
+        ],
+        "errors": [
+            *[str(item) for item in table_amount_state.get("errors", [])],
+        ],
+    }
+
+
+def derive_reconstructed_preflop(
+    action_state: Optional[Dict[str, Any]],
+    *,
+    hero_position: Optional[str],
+) -> Dict[str, Any]:
+    action_state = action_state or {}
+    action_history = [
+        deepcopy(item)
+        for item in action_state.get("action_history", [])
+        if isinstance(item, dict) and str(item.get("street") or "preflop") == "preflop"
+    ]
+    return {
+        "street": "preflop",
+        "hero_position": hero_position,
+        "node_type": action_state.get("node_type_preview"),
+        "opener_pos": action_state.get("opener_pos"),
+        "three_bettor_pos": action_state.get("three_bettor_pos"),
+        "four_bettor_pos": action_state.get("four_bettor_pos"),
+        "limpers": int(action_state.get("limpers", 0) or 0),
+        "callers": int(action_state.get("callers_after_open", 0) or 0),
+        "action_history": action_history,
+        "final_contribution_bb_by_pos": _copy_dict(action_state.get("final_contribution_bb_by_pos")),
+        "same_hand_identity": bool(action_state.get("same_hand_identity", False)),
+    }
+
+
+def derive_reconstructed_postflop(
+    *,
+    street: str,
+    action_state: Optional[Dict[str, Any]],
+    advisor_input: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    action_state = action_state or {}
+    advisor_input = advisor_input or {}
+    action_history = [
+        deepcopy(item)
+        for item in action_state.get("action_history", [])
+        if isinstance(item, dict) and str(item.get("street") or "") not in {"", "preflop"}
+    ]
+    return {
+        "street": street,
+        "pot_before_hero": advisor_input.get("pot_before_hero"),
+        "to_call": advisor_input.get("to_call"),
+        "effective_stack": advisor_input.get("effective_stack"),
+        "hero_position": advisor_input.get("hero_position"),
+        "villain_positions": _copy_list(advisor_input.get("villain_positions")),
+        "line_context": _copy_dict(advisor_input.get("line_context")),
+        "action_history": action_history,
+        "final_contribution_street_bb_by_pos": _copy_dict(action_state.get("final_contribution_street_bb_by_pos")),
+    }
+
+
+def _extract_engine_values(
+    engine_result: Optional[Dict[str, Any]],
+    solver_output: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    engine_result = engine_result or {}
+    solver_output = solver_output or {}
+    result_payload = solver_output.get("result") if isinstance(solver_output, dict) else None
+    return {
+        "action": engine_result.get("engine_action") or (result_payload or {}).get("engine_action"),
+        "amount_to": engine_result.get("amount_to") if "amount_to" in engine_result else (result_payload or {}).get("amount_to"),
+        "size_pct": engine_result.get("size_pct") if "size_pct" in engine_result else (result_payload or {}).get("size_pct"),
+        "reason": engine_result.get("reason") or (result_payload or {}).get("reason"),
+        "confidence": engine_result.get("confidence") if "confidence" in engine_result else (result_payload or {}).get("confidence"),
+        "status": engine_result.get("status"),
+    }
+
+
+def derive_analysis_panel(
+    *,
+    street: str,
+    hero_position: Optional[str],
+    occupied_positions: Optional[List[str]],
+    action_state: Optional[Dict[str, Any]],
+    advisor_input: Optional[Dict[str, Any]],
+    solver_input: Optional[Dict[str, Any]],
+    solver_output: Optional[Dict[str, Any]],
+    engine_result: Optional[Dict[str, Any]],
+    hero_decision_debug: Optional[Dict[str, Any]],
+    solver_status: str,
+    solver_warnings: Optional[List[str]],
+    solver_errors: Optional[List[str]],
+    solver_result_reused: bool,
+    solver_reuse_reason: Optional[str],
+    solver_fingerprint: Optional[str],
+) -> Dict[str, Any]:
+    action_state = action_state or {}
+    advisor_input = advisor_input or {}
+    solver_input = solver_input or {}
+    solver_output = solver_output or {}
+    engine_result = engine_result or {}
+    hero_decision_debug = hero_decision_debug or {}
+    engine_values = _extract_engine_values(engine_result, solver_output)
+    villain_positions = (
+        advisor_input.get("villain_positions")
+        or solver_input.get("villain_positions")
+        or []
+    )
+    return {
+        "street": street,
+        "context_type": advisor_input.get("context_type") or solver_input.get("context_type"),
+        "node_type": advisor_input.get("node_type") or action_state.get("node_type_preview") or "",
+        "hero_position": hero_position,
+        "villain_positions": list(villain_positions) if isinstance(villain_positions, list) else [],
+        "player_count": len(list(occupied_positions or [])),
+        "action_history": _copy_list(action_state.get("action_history"))[-16:],
+        "reconstructed_action_history": _copy_list(action_state.get("action_history"))[-16:],
+        "recommended_action": str(engine_values.get("action") or "").upper(),
+        "recommended_amount_to": _trim_float(engine_values.get("amount_to")),
+        "recommended_size_pct": _trim_float(engine_values.get("size_pct")),
+        "decision_reason": engine_values.get("reason"),
+        "decision_confidence": engine_values.get("confidence"),
+        "engine_status": engine_result.get("status") or solver_status,
+        "solver_status": solver_status,
+        "solver_reused": bool(solver_result_reused),
+        "solver_reuse_reason": solver_reuse_reason,
+        "solver_fingerprint": solver_fingerprint,
+        "solver_warnings": [str(item) for item in (solver_warnings or [])],
+        "solver_errors": [str(item) for item in (solver_errors or [])],
+        "range_debug": _copy_dict((hero_decision_debug.get("postflop") or hero_decision_debug.get("preflop") or {})),
+        "hero_decision_debug": _copy_dict(hero_decision_debug),
+    }
+
+
+def _compute_recommended_action(engine_result: Optional[Dict[str, Any]], solver_output: Optional[Dict[str, Any]]) -> str:
+    value = _extract_engine_values(engine_result, solver_output).get("action")
+    return str(value).upper() if value else ""
+
+
+def _compute_recommended_amount_to(engine_result: Optional[Dict[str, Any]], solver_output: Optional[Dict[str, Any]]) -> Optional[float]:
+    value = _extract_engine_values(engine_result, solver_output).get("amount_to")
+    return None if value is None else float(value)
+
+
+def _compute_recommended_size_pct(engine_result: Optional[Dict[str, Any]], solver_output: Optional[Dict[str, Any]]) -> Optional[float]:
+    value = _extract_engine_values(engine_result, solver_output).get("size_pct")
+    return None if value is None else float(value)
+
+
+def _compute_node_type(action_state: Optional[Dict[str, Any]], advisor_input: Optional[Dict[str, Any]]) -> str:
+    advisor_input = advisor_input or {}
+    action_state = action_state or {}
+    value = advisor_input.get("node_type") or action_state.get("node_type_preview") or ""
+    return str(value)
+
+
+def _compute_engine_status(engine_result: Optional[Dict[str, Any]], solver_status: str) -> str:
+    engine_result = engine_result or {}
+    return str(engine_result.get("status") or solver_status or "not_run")
 
 
 @dataclass(slots=True)
@@ -151,16 +348,21 @@ class FrameAnalysis:
     table_amount_state: Dict[str, Any] = field(default_factory=dict)
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_inference: Dict[str, Any] = field(default_factory=dict)
-    # Stable solver-layer preview fields.
+    reconstructed_preflop: Dict[str, Any] = field(default_factory=dict)
+    reconstructed_postflop: Dict[str, Any] = field(default_factory=dict)
+    advisor_input: Dict[str, Any] = field(default_factory=dict)
+    solver_input: Dict[str, Any] = field(default_factory=dict)
+    solver_output: Dict[str, Any] = field(default_factory=dict)
+    engine_result: Dict[str, Any] = field(default_factory=dict)
     solver_context_preview: Dict[str, Any] = field(default_factory=dict)
-    solver_result: Dict[str, Any] = field(default_factory=dict)
     solver_status: str = "not_run"
     solver_warnings: List[str] = field(default_factory=list)
-    solver_fingerprint_preview: str = ""
-    solver_result_reused: bool = False
-    solver_reuse_reason: Optional[str] = None
+    solver_errors: List[str] = field(default_factory=list)
+    hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
+    solver_fingerprint_preview: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        street = self.street or "preflop"
         return {
             "frame_id": self.frame_id,
             "timestamp": self.timestamp,
@@ -177,30 +379,43 @@ class FrameAnalysis:
                 region_id: [det.to_dict() for det in detections]
                 for region_id, detections in self.table_amount_digit_detections.items()
             },
-            "street": self.street,
+            "street": street,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
-            "validation": self.validation,
+            "validation": deepcopy(self.validation),
             "player_count": self.player_count,
             "table_format": self.table_format,
             "occupied_positions": list(self.occupied_positions),
-            "positions": self.positions,
+            "positions": deepcopy(self.positions),
             "hero_position": self.hero_position,
             "hero_cards": list(self.hero_cards),
             "board_cards": list(self.board_cards),
-            "player_states": self.player_states,
+            "player_states": deepcopy(self.player_states),
             "table_center": self.table_center,
             "btn_detection": self.btn_detection.to_dict() if self.btn_detection else None,
-            "table_amount_state": dict(self.table_amount_state),
-            "amount_normalization": dict(self.amount_normalization),
-            "action_inference": dict(self.action_inference),
-            "solver_context_preview": dict(self.solver_context_preview),
-            "solver_result": dict(self.solver_result),
+            "table_amount_state": deepcopy(self.table_amount_state),
+            "amount_normalization": deepcopy(self.amount_normalization),
+            "amount_state": derive_amount_state(self.table_amount_state, self.amount_normalization),
+            "action_inference": deepcopy(self.action_inference),
+            "reconstructed_preflop": deepcopy(self.reconstructed_preflop) or derive_reconstructed_preflop(
+                self.action_inference,
+                hero_position=self.hero_position,
+            ),
+            "reconstructed_postflop": deepcopy(self.reconstructed_postflop) or derive_reconstructed_postflop(
+                street=street,
+                action_state=self.action_inference,
+                advisor_input=self.advisor_input or self.solver_context_preview,
+            ),
+            "advisor_input": deepcopy(self.advisor_input),
+            "solver_input": deepcopy(self.solver_input),
+            "solver_output": deepcopy(self.solver_output),
+            "engine_result": deepcopy(self.engine_result),
+            "solver_context_preview": deepcopy(self.solver_context_preview),
             "solver_status": self.solver_status,
             "solver_warnings": list(self.solver_warnings),
+            "solver_errors": list(self.solver_errors),
+            "hero_decision_debug": deepcopy(self.hero_decision_debug),
             "solver_fingerprint_preview": self.solver_fingerprint_preview,
-            "solver_result_reused": self.solver_result_reused,
-            "solver_reuse_reason": self.solver_reuse_reason,
         }
 
 
@@ -244,9 +459,8 @@ class HandState:
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_state: Dict[str, Any] = field(default_factory=dict)
     actions_log: List[Dict[str, Any]] = field(default_factory=list)
-    # Stable solver-layer state. These top-level fields are the ONLY canonical
-    # solver persistence contract for hand.json. Do not duplicate the same data
-    # back into processing_summary or other legacy ad-hoc blocks.
+    reconstructed_preflop: Dict[str, Any] = field(default_factory=dict)
+    reconstructed_postflop: Dict[str, Any] = field(default_factory=dict)
     advisor_input: Dict[str, Any] = field(default_factory=dict)
     solver_input: Dict[str, Any] = field(default_factory=dict)
     solver_output: Dict[str, Any] = field(default_factory=dict)
@@ -256,13 +470,40 @@ class HandState:
     solver_warnings: List[str] = field(default_factory=list)
     solver_errors: List[str] = field(default_factory=list)
     hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
-    solver_fingerprint: str = ""
+    solver_fingerprint: Optional[str] = None
     solver_result_reused: bool = False
     solver_reuse_reason: Optional[str] = None
     solver_run_frame_id: Optional[str] = None
     solver_run_timestamp: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        street = str(self.street_state.get("current_street") or "preflop")
+        reconstructed_preflop = deepcopy(self.reconstructed_preflop) or derive_reconstructed_preflop(
+            self.action_state,
+            hero_position=self.hero_position,
+        )
+        reconstructed_postflop = deepcopy(self.reconstructed_postflop) or derive_reconstructed_postflop(
+            street=street,
+            action_state=self.action_state,
+            advisor_input=self.advisor_input,
+        )
+        analysis_panel = derive_analysis_panel(
+            street=street,
+            hero_position=self.hero_position,
+            occupied_positions=self.occupied_positions,
+            action_state=self.action_state,
+            advisor_input=self.advisor_input,
+            solver_input=self.solver_input,
+            solver_output=self.solver_output,
+            engine_result=self.engine_result,
+            hero_decision_debug=self.hero_decision_debug,
+            solver_status=self.solver_status,
+            solver_warnings=self.solver_warnings,
+            solver_errors=self.solver_errors,
+            solver_result_reused=self.solver_result_reused,
+            solver_reuse_reason=self.solver_reuse_reason,
+            solver_fingerprint=self.solver_fingerprint,
+        )
         return {
             "schema_version": self.schema_version,
             "hand_id": self.hand_id,
@@ -275,35 +516,39 @@ class HandState:
             "hero_position": self.hero_position,
             "hero_cards": list(self.hero_cards),
             "occupied_positions": list(self.occupied_positions),
-            "street_state": self.street_state,
-            "positions": self.positions,
+            "street_state": deepcopy(self.street_state),
+            "positions": deepcopy(self.positions),
             "board_cards": list(self.board_cards),
-            "player_states": self.player_states,
-            "frames_log": self.frames_log,
-            "errors": self.errors,
-            "artifacts": self.artifacts,
-            "processing_summary": self.processing_summary,
-            "render_state_snapshot": self.render_state_snapshot,
+            "player_states": deepcopy(self.player_states),
+            "frames_log": deepcopy(self.frames_log),
+            "errors": deepcopy(self.errors),
+            "artifacts": deepcopy(self.artifacts),
+            "processing_summary": deepcopy(self.processing_summary),
+            "render_state_snapshot": deepcopy(self.render_state_snapshot),
             "conflict_state": self.conflict_state,
             "table_center": self.table_center,
-            "table_amount_state": dict(self.table_amount_state),
-            "amount_normalization": dict(self.amount_normalization),
-            "action_state": dict(self.action_state),
-            "actions_log": list(self.actions_log),
-            "advisor_input": dict(self.advisor_input),
-            "solver_input": dict(self.solver_input),
-            "solver_output": dict(self.solver_output),
-            "engine_result": dict(self.engine_result),
-            "solver_context": dict(self.solver_context),
+            "table_amount_state": deepcopy(self.table_amount_state),
+            "amount_normalization": deepcopy(self.amount_normalization),
+            "amount_state": derive_amount_state(self.table_amount_state, self.amount_normalization),
+            "action_state": deepcopy(self.action_state),
+            "actions_log": deepcopy(self.actions_log),
+            "reconstructed_preflop": reconstructed_preflop,
+            "reconstructed_postflop": reconstructed_postflop,
+            "advisor_input": deepcopy(self.advisor_input),
+            "solver_input": deepcopy(self.solver_input),
+            "solver_output": deepcopy(self.solver_output),
+            "engine_result": deepcopy(self.engine_result),
+            "solver_context": deepcopy(self.solver_context),
             "solver_status": self.solver_status,
             "solver_warnings": list(self.solver_warnings),
             "solver_errors": list(self.solver_errors),
-            "hero_decision_debug": dict(self.hero_decision_debug),
+            "hero_decision_debug": deepcopy(self.hero_decision_debug),
             "solver_fingerprint": self.solver_fingerprint,
             "solver_result_reused": self.solver_result_reused,
             "solver_reuse_reason": self.solver_reuse_reason,
             "solver_run_frame_id": self.solver_run_frame_id,
             "solver_run_timestamp": self.solver_run_timestamp,
+            "analysis_panel": analysis_panel,
         }
 
 
@@ -326,10 +571,10 @@ class RenderState:
     seat_order: List[str] = field(default_factory=list)
     table_amount_state: Dict[str, Any] = field(default_factory=dict)
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
-    # action_annotations is reserved for table/action UI context only. Solver
-    # state must stay in the dedicated top-level fields below, not in duplicated
-    # legacy nested payloads such as action_annotations["solver_bridge"].
+    amount_state: Dict[str, Any] = field(default_factory=dict)
     action_annotations: Dict[str, Any] = field(default_factory=dict)
+    reconstructed_preflop: Dict[str, Any] = field(default_factory=dict)
+    reconstructed_postflop: Dict[str, Any] = field(default_factory=dict)
     advisor_input: Dict[str, Any] = field(default_factory=dict)
     solver_input: Dict[str, Any] = field(default_factory=dict)
     solver_output: Dict[str, Any] = field(default_factory=dict)
@@ -339,16 +584,17 @@ class RenderState:
     solver_warnings: List[str] = field(default_factory=list)
     solver_errors: List[str] = field(default_factory=list)
     hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
-    solver_fingerprint: str = ""
+    solver_fingerprint: Optional[str] = None
     solver_result_reused: bool = False
     solver_reuse_reason: Optional[str] = None
     solver_run_frame_id: Optional[str] = None
     solver_run_timestamp: Optional[str] = None
-    recommended_action: Optional[str] = None
+    recommended_action: str = ""
     recommended_amount_to: Optional[float] = None
     recommended_size_pct: Optional[float] = None
     node_type: str = ""
     engine_status: str = "not_run"
+    analysis_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -392,4 +638,4 @@ class PipelineArtifacts:
 
 
 def utc_now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="milliseconds")
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="milliseconds")
