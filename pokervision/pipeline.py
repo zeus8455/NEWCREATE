@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -19,6 +19,7 @@ from .hand_state import HandStateManager, MATCH_STRONG, MATCH_WEAK
 from .json_manager import save_hand_json
 from .models import BBox, Detection, FrameAnalysis, HandState
 from .render_state import build_render_state
+from .solver_bridge import build_recommendation as build_solver_recommendation
 from .storage import StorageManager
 from .table_amount_logic import build_table_amount_state
 from .table_logic import assign_positions, determine_hero_position
@@ -38,21 +39,42 @@ class PipelineResult:
     render_state: Optional[dict]
 
 
-def _draw_detections(image: np.ndarray, detections: list[Detection], color=(0, 255, 255)) -> np.ndarray:
+def _draw_detections(
+    image: np.ndarray,
+    detections: list[Detection],
+    color: tuple[int, int, int] = (0, 255, 255),
+) -> np.ndarray:
     out = image.copy()
     for det in detections:
-        x1, y1, x2, y2 = map(int, [det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2])
+        x1, y1, x2, y2 = map(
+            int,
+            [det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2],
+        )
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(out, det.label, (x1, max(12, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        cv2.putText(
+            out,
+            det.label,
+            (x1, max(12, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            color,
+            2,
+        )
     return out
 
 
 def _region_key(det: Detection) -> str:
     bbox = det.bbox
-    return f"{det.label}@{round(bbox.x1, 1)}:{round(bbox.y1, 1)}:{round(bbox.x2, 1)}:{round(bbox.y2, 1)}"
+    return (
+        f"{det.label}@"
+        f"{round(bbox.x1, 1)}:{round(bbox.y1, 1)}:{round(bbox.x2, 1)}:{round(bbox.y2, 1)}"
+    )
 
 
-def _localize(global_detections: list[Detection], origin: tuple[int, int]) -> list[Detection]:
+def _localize(
+    global_detections: list[Detection],
+    origin: tuple[int, int],
+) -> list[Detection]:
     ox, oy = origin
     localized: list[Detection] = []
     for d in global_detections:
@@ -66,8 +88,72 @@ def _localize(global_detections: list[Detection], origin: tuple[int, int]) -> li
     return localized
 
 
+def _normalize_solver_payload(result: Any) -> dict[str, Any]:
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        return dict(result)
+
+    payload: dict[str, Any] = {
+        "type": type(result).__name__,
+        "raw_repr": repr(result),
+    }
+    for attr in (
+        "street",
+        "engine_action",
+        "amount_to",
+        "size_pct",
+        "actor_name",
+        "actor_pos",
+        "reason",
+        "confidence",
+        "source",
+        "debug",
+    ):
+        if hasattr(result, attr):
+            payload[attr] = getattr(result, attr)
+
+    for nested_name in ("preflop", "postflop"):
+        nested = getattr(result, nested_name, None)
+        if nested is not None:
+            nested_payload = {
+                key: getattr(nested, key)
+                for key in (
+                    "action",
+                    "hand_class",
+                    "actor_name",
+                    "actor_pos",
+                    "is_mixed_action",
+                    "matching_actions",
+                    "selected_range_expr",
+                    "action_map",
+                    "amount_to",
+                    "size_pct",
+                    "fallback_reason",
+                    "meta",
+                    "street",
+                    "hero_equity",
+                    "realized_equity",
+                    "report",
+                )
+                if hasattr(nested, key)
+            }
+            payload[nested_name] = nested_payload
+
+    villain_sources = getattr(result, "villain_sources", None)
+    if villain_sources is not None:
+        payload["villain_sources"] = [repr(source) for source in villain_sources]
+    return payload
+
+
 class PokerVisionPipeline:
-    def __init__(self, settings: Settings, detector_backend, storage: StorageManager, hand_manager: HandStateManager):
+    def __init__(
+        self,
+        settings: Settings,
+        detector_backend,
+        storage: StorageManager,
+        hand_manager: HandStateManager,
+    ):
         self.settings = settings
         self.detector_backend = detector_backend
         self.storage = storage
@@ -77,6 +163,7 @@ class PokerVisionPipeline:
         self.hand_manager.mark_stale_if_needed(frame.timestamp)
         active = self.detector_backend.detect_active_hero(frame)
         overlay = _draw_detections(frame.image, active, color=(0, 255, 255))
+
         if not active:
             analysis = FrameAnalysis(frame.frame_id, frame.timestamp, False)
             return PipelineResult(
@@ -101,6 +188,7 @@ class PokerVisionPipeline:
             structure_detections=structure_dets,
             validation={"structure_ok": structure_val.ok},
         )
+
         if not structure_val.ok:
             analysis.errors.extend(structure_val.errors)
             self.storage.save_failure_artifacts(
@@ -150,7 +238,11 @@ class PokerVisionPipeline:
         street = str(street_val.meta["street"])
         analysis.street = street
         table_center, positions = assign_positions(seats, btn, player_count)
-        hero_position = determine_hero_position(positions, active, self.settings.seat_match_max_distance_px)
+        hero_position = determine_hero_position(
+            positions,
+            active,
+            self.settings.seat_match_max_distance_px,
+        )
         positions[hero_position]["is_hero"] = True
         occupied_positions = list(positions.keys())
         analysis.positions = positions
@@ -170,6 +262,7 @@ class PokerVisionPipeline:
             player_crops[position] = player_crop
             player_overlays[position] = player_overlay
             analysis.player_state_detections[position] = player_global_dets
+
             player_val = validate_player_state(
                 position,
                 player_local_dets,
@@ -314,7 +407,12 @@ class PokerVisionPipeline:
             else:
                 retry_ok = False
                 if self.settings.max_retry_per_stage > 0:
-                    expanded_marker = BBox(board_bbox.x1 - 20, board_bbox.y1 - 10, board_bbox.x2 + 20, board_bbox.y2 + 10)
+                    expanded_marker = BBox(
+                        board_bbox.x1 - 20,
+                        board_bbox.y1 - 10,
+                        board_bbox.x2 + 20,
+                        board_bbox.y2 + 10,
+                    )
                     retry_global = self.detector_backend.detect_board_cards(frame, expanded_marker, street)
                     retry_crop, retry_origin = build_board_crop(frame.image, expanded_marker, self.settings)
                     retry_local = _localize(retry_global, retry_origin)
@@ -340,7 +438,8 @@ class PokerVisionPipeline:
                         player_overlays=player_overlays,
                         table_amount_crops=table_amount_crops,
                         table_amount_overlays=table_amount_overlays,
-                        debug_images=[overlay, hero_overlay] + ([board_overlay] if board_overlay is not None else []),
+                        debug_images=[overlay, hero_overlay]
+                        + ([board_overlay] if board_overlay is not None else []),
                     )
                     self.hand_manager.register_error(
                         self.hand_manager.active_hand,
@@ -351,12 +450,45 @@ class PokerVisionPipeline:
                     )
                     return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
 
-        previous_street = self.hand_manager.active_hand.street_state.get("current_street") if self.hand_manager.active_hand else None
+        previous_street = (
+            self.hand_manager.active_hand.street_state.get("current_street")
+            if self.hand_manager.active_hand
+            else None
+        )
         hand, decision, created_new = self.hand_manager.update_or_create(analysis)
+
+        # CRITICAL INVARIANT:
+        # The main pipeline must call solver_bridge only after HandState is updated from
+        # normalized analysis, and before build_render_state()/save_hand_json().
+        # If bridge invocation is moved back to the external launcher or after render-state
+        # generation, solver semantics will drift again between pipeline and launcher.
+        solver_payload: dict[str, Any] = {}
+        try:
+            solver_result = build_solver_recommendation(analysis, hand, self.settings)
+            solver_payload = {
+                "status": "ok",
+                "result": _normalize_solver_payload(solver_result),
+            }
+            analysis.validation["solver_bridge_ok"] = True
+        except Exception as exc:  # pragma: no cover - defensive runtime path
+            solver_payload = {
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            analysis.validation["solver_bridge_ok"] = False
+            analysis.warnings.append(f"solver_bridge: {type(exc).__name__}: {exc}")
+
+        if not isinstance(hand.processing_summary, dict):
+            hand.processing_summary = {}
+        hand.processing_summary["solver_bridge"] = solver_payload
+
         repeated_same_street = (
-            not created_new and previous_street == analysis.street and decision.status in {MATCH_STRONG, MATCH_WEAK}
+            not created_new
+            and previous_street == analysis.street
+            and decision.status in {MATCH_STRONG, MATCH_WEAK}
         )
         save_only_raw = repeated_same_street and not self.settings.normal_mode_save_repeated_frames
+
         artifacts = self.storage.save_pipeline_artifacts(
             hand.hand_id,
             frame.frame_id,
@@ -378,6 +510,7 @@ class PokerVisionPipeline:
             save_only_raw=save_only_raw,
         )
         hand.artifacts = artifacts.to_dict()
+
         render_state = build_render_state(hand, frame.frame_id, frame.timestamp).to_dict()
         hand.render_state_snapshot = render_state
         self.storage.save_render_state(hand.hand_id, render_state)

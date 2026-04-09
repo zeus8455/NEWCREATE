@@ -21,11 +21,9 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
     last_actions = dict(action_state.get("last_actions_by_position", {}))
     bet_map = (hand.table_amount_state or {}).get("bets_by_position", {}) if isinstance(hand.table_amount_state, dict) else {}
     amount_norm = hand.amount_normalization or {}
-    normalized_street = (
-        amount_norm.get("final_contribution_street_bb_by_pos", {}) if isinstance(amount_norm, dict) else {}
-    )
-
+    normalized_street = amount_norm.get("final_contribution_street_bb_by_pos", {}) if isinstance(amount_norm, dict) else {}
     seat_order = _build_display_seat_order(hand)
+
     for position in hand.occupied_positions:
         player_state = hand.player_states.get(position, {})
         is_fold = player_state.get("is_fold", False)
@@ -65,6 +63,10 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
     if hand.conflict_state:
         warnings.append(hand.conflict_state)
 
+    solver_summary = {}
+    if isinstance(hand.processing_summary, dict):
+        solver_summary = dict(hand.processing_summary.get("solver_bridge", {}))
+
     return RenderState(
         hand_id=hand.hand_id,
         player_count=hand.player_count,
@@ -86,5 +88,6 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         action_annotations={
             "actions_log": list(hand.actions_log[-12:]),
             "last_actions_by_position": last_actions,
+            "solver_bridge": solver_summary,
         },
     )
