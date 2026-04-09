@@ -355,6 +355,7 @@ class FrameAnalysis:
     solver_output: Dict[str, Any] = field(default_factory=dict)
     engine_result: Dict[str, Any] = field(default_factory=dict)
     solver_context_preview: Dict[str, Any] = field(default_factory=dict)
+    solver_result: Dict[str, Any] = field(default_factory=dict)
     solver_status: str = "not_run"
     solver_warnings: List[str] = field(default_factory=list)
     solver_errors: List[str] = field(default_factory=list)
@@ -411,6 +412,7 @@ class FrameAnalysis:
             "solver_output": deepcopy(self.solver_output),
             "engine_result": deepcopy(self.engine_result),
             "solver_context_preview": deepcopy(self.solver_context_preview),
+            "solver_result": deepcopy(self.solver_result),
             "solver_status": self.solver_status,
             "solver_warnings": list(self.solver_warnings),
             "solver_errors": list(self.solver_errors),

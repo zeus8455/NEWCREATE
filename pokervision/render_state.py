@@ -28,6 +28,15 @@ def _build_display_seat_order(hand: HandState) -> list[str]:
     return available
 
 
+def _clear_legacy_solver_annotation(action_annotations: dict) -> dict:
+    """Remove deprecated duplicated solver payload from action annotations."""
+    if not isinstance(action_annotations, dict):
+        return {}
+    cleaned = dict(action_annotations)
+    cleaned.pop("solver_bridge", None)
+    return cleaned
+
+
 def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: str) -> RenderState:
     players: dict[str, dict] = {}
     action_state = hand.action_state or {}
@@ -122,10 +131,10 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         table_amount_state=dict(hand.table_amount_state),
         amount_normalization=dict(hand.amount_normalization),
         amount_state=derive_amount_state(hand.table_amount_state, hand.amount_normalization),
-        action_annotations={
+        action_annotations=_clear_legacy_solver_annotation({
             "actions_log": list(hand.actions_log[-12:]),
             "last_actions_by_position": last_actions,
-        },
+        }),
         reconstructed_preflop=reconstructed_preflop,
         reconstructed_postflop=reconstructed_postflop,
         advisor_input=dict(hand.advisor_input),
