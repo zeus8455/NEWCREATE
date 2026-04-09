@@ -101,7 +101,7 @@ def _build_legacy_solver_summary(payload: Any, status: str, errors: list[str]) -
     return summary
 
 
-def _build_solver_context_preview(analysis: FrameAnalysis, hand: HandState) -> dict[str, Any]:
+def _build_solver_context_preview_fallback(analysis: FrameAnalysis, hand: HandState) -> dict[str, Any]:
     action_state = hand.action_state or {}
     preview: dict[str, Any] = {
         "street": analysis.street,
@@ -130,7 +130,7 @@ def _build_solver_context_preview(analysis: FrameAnalysis, hand: HandState) -> d
     return preview
 
 
-def _build_advisor_input(analysis: FrameAnalysis, hand: HandState, solver_context: dict[str, Any]) -> dict[str, Any]:
+def _build_advisor_input_fallback(analysis: FrameAnalysis, hand: HandState, solver_context: dict[str, Any]) -> dict[str, Any]:
     action_state = hand.action_state or {}
     amount_norm = hand.amount_normalization or {}
     if analysis.street == "preflop":
@@ -162,6 +162,17 @@ def _build_advisor_input(analysis: FrameAnalysis, hand: HandState, solver_contex
         "line_context": _safe_jsonable(action_state.get("line_context", {})),
     }
 
+
+def _get_solver_context_payload(analysis: FrameAnalysis, hand: HandState, payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("solver_context"), dict):
+        return _safe_jsonable(payload.get("solver_context"))
+    return _build_solver_context_preview_fallback(analysis, hand)
+
+
+def _get_advisor_input_payload(analysis: FrameAnalysis, hand: HandState, payload: Any, solver_context: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("advisor_input"), dict):
+        return _safe_jsonable(payload.get("advisor_input"))
+    return _build_advisor_input_fallback(analysis, hand, solver_context)
 
 def _build_engine_result_from_payload(payload: Any, status: str) -> dict[str, Any]:
     result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
@@ -218,8 +229,10 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
     elif payload is None:
         status = "not_run"
 
-    solver_context = _build_solver_context_preview(analysis, hand)
-    advisor_input = _build_advisor_input(analysis, hand, solver_context)
+    solver_context = _get_solver_context_payload(analysis, hand, payload)
+    advisor_input = _get_advisor_input_payload(analysis, hand, payload, solver_context)
+    if isinstance(payload, dict) and payload.get("warnings"):
+        errors.extend([str(item) for item in payload.get("warnings", [])])
     engine_result = _build_engine_result_from_payload(payload, status)
     hero_debug = _build_hero_decision_debug_from_payload(payload, status, errors)
     legacy_summary = _build_legacy_solver_summary(payload, status, errors)

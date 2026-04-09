@@ -15,7 +15,7 @@ here, otherwise bridge semantics will drift again between the main pipeline and
 the external launcher.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields, is_dataclass
 import importlib
 from types import ModuleType
 from typing import Any, Dict, List, Optional
@@ -76,6 +76,29 @@ def _solve_hero_preflop(context):
 def _solve_hero_postflop(context, **kwargs):
     module = _import_bridge_module("hero_decision")
     return module.solve_hero_postflop(context, **kwargs)
+
+
+def _serialize_for_payload(value: Any, *, depth: int = 0) -> Any:
+    if depth > 8:
+        return repr(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if is_dataclass(value):
+        return {
+            field.name: _serialize_for_payload(getattr(value, field.name), depth=depth + 1)
+            for field in dataclass_fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(k): _serialize_for_payload(v, depth=depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_serialize_for_payload(v, depth=depth + 1) for v in value]
+    if hasattr(value, "__dict__"):
+        return {
+            str(k): _serialize_for_payload(v, depth=depth + 1)
+            for k, v in vars(value).items()
+            if not str(k).startswith("_")
+        }
+    return repr(value)
 
 
 @dataclass(slots=True)
@@ -725,31 +748,132 @@ class EngineBridge:
     # recommendation construction
     # ------------------------------
     def build_recommendation(self, analysis, hand):
-        HeroDecision, PostflopContext, _ = _import_decision_types()
         if hand is None:
-            return None
+            return {"status": "not_run", "result": None, "reason": "no_hand"}
         hero_cards = list(getattr(hand, "hero_cards", None) or getattr(analysis, "hero_cards", None) or [])
         if len(hero_cards) != 2:
-            return None
+            return {"status": "not_run", "result": None, "reason": "hero_cards_not_exactly_two"}
 
         street_state = getattr(hand, "street_state", {}) if hand is not None else {}
         street = str(street_state.get("current_street") or getattr(analysis, "street", None) or "preflop").lower()
         if street == "preflop":
-            return self._build_preflop_recommendation(hand, hero_cards)
-        return self._build_postflop_recommendation(hand, hero_cards, street)
+            return self._build_preflop_recommendation(analysis, hand, hero_cards)
+        return self._build_postflop_recommendation(analysis, hand, hero_cards, street)
 
-    def _build_preflop_recommendation(self, hand, hero_cards: List[str]):
-        spot = self._build_hero_preflop_spot(hand)
-        context = spot.to_preflop_context(
-            hero_cards,
+    def build_preflop_context(self, analysis, hand):
+        _, _, PreflopContext = _import_decision_types()
+        hero_cards = list(getattr(hand, "hero_cards", None) or getattr(analysis, "hero_cards", None) or [])
+        if hand is None or len(hero_cards) != 2:
+            return None
+
+        action_state = getattr(hand, "action_state", {}) or {}
+        hero_preview = dict(action_state.get("hero_context_preview") or {})
+        fallback_spot: Optional[SpotDescription] = None
+
+        node_type = str(hero_preview.get("node_type") or action_state.get("node_type_preview") or "").strip()
+        if not node_type:
+            fallback_spot = self._build_hero_preflop_spot(hand)
+            node_type = fallback_spot.node_type
+
+        opener_pos = hero_preview.get("opener_pos")
+        three_bettor_pos = hero_preview.get("three_bettor_pos")
+        four_bettor_pos = hero_preview.get("four_bettor_pos")
+        limpers = hero_preview.get("limpers")
+        callers = hero_preview.get("callers")
+
+        if fallback_spot is None and (
+            opener_pos is None and three_bettor_pos is None and four_bettor_pos is None and limpers is None and callers is None
+        ):
+            fallback_spot = self._build_hero_preflop_spot(hand)
+
+        if fallback_spot is not None:
+            opener_pos = fallback_spot.opener_pos if opener_pos is None else opener_pos
+            three_bettor_pos = fallback_spot.three_bettor_pos if three_bettor_pos is None else three_bettor_pos
+            four_bettor_pos = fallback_spot.four_bettor_pos if four_bettor_pos is None else four_bettor_pos
+            limpers = fallback_spot.limpers if limpers is None else limpers
+            callers = fallback_spot.callers if callers is None else callers
+
+        action_history = list(action_state.get("action_history") or self._street_actions(hand, "preflop"))
+        hero_pos = self._preflop_pos(hand.hero_position, int(hand.player_count))
+        return PreflopContext(
+            hero_hand=list(hero_cards),
+            hero_pos=hero_pos,
+            node_type=node_type or "unopened",
+            opener_pos=opener_pos,
+            three_bettor_pos=three_bettor_pos,
+            four_bettor_pos=four_bettor_pos,
+            limpers=int(limpers or 0),
+            callers=int(callers or 0),
+            range_owner="hero",
+            action_history=action_history,
             meta={
                 "source": "pokervision",
                 "hand_id": hand.hand_id,
                 "hero_original_position": hand.hero_position,
+                "projection_source": "action_state_preview" if hero_preview else "replayed_actions_fallback",
                 "actions_seen": self._street_actions(hand, "preflop"),
             },
         )
-        return _solve_hero_preflop(context)
+
+    def build_postflop_context(self, analysis, hand, street: Optional[str] = None):
+        _, PostflopContext, _ = _import_decision_types()
+        hero_cards = list(getattr(hand, "hero_cards", None) or getattr(analysis, "hero_cards", None) or [])
+        if hand is None or len(hero_cards) != 2:
+            return None
+        resolved_street = str(street or getattr(hand, "street_state", {}).get("current_street") or getattr(analysis, "street", "") or "").lower()
+        board = list(getattr(hand, "board_cards", None) or getattr(analysis, "board_cards", None) or [])
+        if resolved_street not in POSTFLOP_STREETS or len(board) not in {3, 4, 5}:
+            return None
+
+        villain_positions = [
+            pos for pos in self._ordered_positions(hand)
+            if pos != hand.hero_position and not hand.player_states.get(pos, {}).get("is_fold", False)
+        ]
+        if not villain_positions:
+            return None
+
+        line_context = self._build_postflop_line_context(hand, resolved_street)
+        return PostflopContext(
+            hero_hand=list(hero_cards),
+            board=list(board),
+            pot_before_hero=self._pot_before_hero(hand),
+            to_call=self._to_call(hand),
+            effective_stack=self._effective_stack(hand),
+            hero_position=hand.hero_position,
+            villain_positions=list(villain_positions),
+            line_context=line_context,
+            dead_cards=[],
+            street=resolved_street,
+            player_count=int(hand.player_count),
+            meta={
+                "source": "pokervision",
+                "hand_id": hand.hand_id,
+                "hero_original_position": hand.hero_position,
+                "projection_source": "postflop_runtime_projection",
+                "hero_in_position": self._hero_in_position_postflop(hand),
+            },
+        )
+
+    def _build_contract_payload(self, context: Any) -> Dict[str, Any]:
+        contract_name = type(context).__name__
+        payload = {"context_type": contract_name}
+        payload.update(_serialize_for_payload(context))
+        return payload
+
+    def _build_preflop_recommendation(self, analysis, hand, hero_cards: List[str]):
+        context = self.build_preflop_context(analysis, hand)
+        if context is None:
+            return {"status": "not_run", "result": None, "reason": "preflop_context_unavailable"}
+        contract_payload = self._build_contract_payload(context)
+        result = _solve_hero_preflop(context)
+        return {
+            "status": "ok",
+            "context_type": "PreflopContext",
+            "solver_context": dict(contract_payload),
+            "advisor_input": dict(contract_payload),
+            "projection_meta": _serialize_for_payload(getattr(context, "meta", {})),
+            "result": result,
+        }
 
     def _build_postflop_line_context(self, hand, street: str) -> Dict[str, object]:
         current_actions = [a for a in self._street_actions(hand, street)]
@@ -781,67 +905,58 @@ class EngineBridge:
             "villain_positions": villain_positions,
         }
 
-    def _build_postflop_recommendation(self, hand, hero_cards: List[str], street: str):
-        HeroDecision, PostflopContext, _ = _import_decision_types()
-        board = list(hand.board_cards or [])
-        if len(board) not in {3, 4, 5}:
-            return None
+    def _build_postflop_recommendation(self, analysis, hand, hero_cards: List[str], street: str):
+        context = self.build_postflop_context(analysis, hand, street)
+        if context is None:
+            return {"status": "not_run", "result": None, "reason": "postflop_context_unavailable"}
 
-        villain_positions = [
-            pos for pos in self._ordered_positions(hand)
-            if pos != hand.hero_position and not hand.player_states.get(pos, {}).get("is_fold", False)
-        ]
-        if not villain_positions:
-            return None
-
-        line_context = self._build_postflop_line_context(hand, street)
-        context = PostflopContext(
-            hero_hand=list(hero_cards),
-            board=list(board),
-            pot_before_hero=self._pot_before_hero(hand),
-            to_call=self._to_call(hand),
-            effective_stack=self._effective_stack(hand),
-            hero_position=hand.hero_position,
-            villain_positions=list(villain_positions),
-            line_context=line_context,
-            dead_cards=[],
-            street=street,
-            player_count=int(hand.player_count),
-            meta={
-                "source": "pokervision",
-                "hand_id": hand.hand_id,
-            },
-        )
-
+        villain_positions = list(getattr(context, "villain_positions", []) or [])
+        hero_in_position = self._hero_in_position_postflop(hand)
         villain_postflop_players = self._build_villain_postflop_players(hand, street)
+        result = None
+        warning_messages: List[str] = []
         try:
-            return _solve_hero_postflop(
+            result = _solve_hero_postflop(
                 context,
                 villain_postflop_players=villain_postflop_players,
-                hero_in_position=self._hero_in_position_postflop(hand),
+                hero_in_position=hero_in_position,
                 trials=6000,
                 seed=42,
             )
-        except Exception:
+        except Exception as exc:
+            warning_messages.append(str(exc))
             try:
                 villain_preflop_spots = self._build_villain_preflop_spots(hand)
-                return _solve_hero_postflop(
+                result = _solve_hero_postflop(
                     context,
                     villain_preflop_spots=villain_preflop_spots,
-                    hero_in_position=self._hero_in_position_postflop(hand),
+                    hero_in_position=hero_in_position,
                     trials=6000,
                     seed=42,
                 )
-            except Exception:
+            except Exception as exc2:
+                warning_messages.append(str(exc2))
                 fallback_ranges = [GENERIC_WIDE_RANGE for _ in villain_positions]
-                return _solve_hero_postflop(
+                result = _solve_hero_postflop(
                     context,
                     villain_ranges=fallback_ranges,
-                    hero_in_position=self._hero_in_position_postflop(hand),
+                    hero_in_position=hero_in_position,
                     trials=5000,
                     seed=42,
                 )
 
+        contract_payload = self._build_contract_payload(context)
+        payload = {
+            "status": "ok",
+            "context_type": "PostflopContext",
+            "solver_context": dict(contract_payload),
+            "advisor_input": dict(contract_payload),
+            "projection_meta": _serialize_for_payload(getattr(context, "meta", {})),
+            "result": result,
+        }
+        if warning_messages:
+            payload["warnings"] = warning_messages
+        return payload
 
 def build_recommendation(analysis, hand, settings=None):
     """Module-level convenience wrapper used by future pipeline integration."""
