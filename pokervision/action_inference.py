@@ -488,10 +488,36 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
     }
 
 
+def _normalized_hero_cards_for_identity(cards: Any) -> tuple[str, ...]:
+    if not cards:
+        return tuple()
+    return tuple(sorted(str(card) for card in cards if card))
+
+
+def _same_hand_identity(previous_hand: Any, analysis: Any) -> bool:
+    """Return True only when previous_hand belongs to the same logical hand.
+
+    CRITICAL INVARIANT:
+    Postflop action-state must never leak across different hand_id instances.
+    infer_actions() runs before HandStateManager decides whether the new frame
+    updates the current hand or opens a new one, so the only safe identity key
+    available here is HERO cards. If we reuse previous postflop commitments when
+    HERO cards changed, a new hand can inherit stale bets/highest commitment and
+    misclassify first-bet spots as raises.
+    """
+    if previous_hand is None:
+        return False
+    prev_cards = _normalized_hero_cards_for_identity(getattr(previous_hand, "hero_cards", []) or [])
+    curr_cards = _normalized_hero_cards_for_identity(getattr(analysis, "hero_cards", []) or [])
+    return bool(prev_cards) and prev_cards == curr_cards
+
+
 def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> Dict[str, Any]:
     street = getattr(analysis, "street", "preflop")
-    previous_action_state = dict(getattr(previous_hand, "action_state", {}) or {}) if previous_hand else {}
-    if previous_action_state.get("street") != street:
+    same_hand = _same_hand_identity(previous_hand, analysis)
+    previous_action_state = dict(getattr(previous_hand, "action_state", {}) or {}) if same_hand else {}
+    can_carry_street_state = same_hand and previous_action_state.get("street") == street
+    if not can_carry_street_state:
         street_commitments: Dict[str, float] = {}
         current_highest = 0.0
         acted_positions: List[str] = []
@@ -524,7 +550,7 @@ def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) ->
         dict(getattr(analysis, "player_states", {}) or {}),
         contributions=current_bets,
     )
-    previous_player_states = getattr(previous_hand, "player_states", {}) if previous_hand else {}
+    previous_player_states = getattr(previous_hand, "player_states", {}) if same_hand and previous_hand else {}
     any_positive_bets = any(amount > 0 for amount in current_bets.values())
     allow_check_inference = bool(getattr(settings, "infer_checks_without_explicit_evidence", False))
 
@@ -628,6 +654,8 @@ def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) ->
         "limpers": [],
         "callers_after_open": 0,
         "node_type_preview": None,
+        "same_hand_identity": same_hand,
+        "carried_previous_street_state": can_carry_street_state,
     }
 
 
