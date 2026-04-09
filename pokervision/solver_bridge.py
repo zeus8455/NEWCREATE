@@ -16,6 +16,8 @@ the external launcher.
 """
 
 from dataclasses import dataclass, field
+import importlib
+from types import ModuleType
 from typing import Any, Dict, List, Optional
 
 CANONICAL_RING = {
@@ -35,19 +37,45 @@ STREET_ORDER = ["preflop", "flop", "turn", "river"]
 POSTFLOP_STREETS = ["flop", "turn", "river"]
 
 
+def _import_bridge_module(module_name: str) -> ModuleType:
+    """Import decision-layer modules with package-safe fallback.
+
+    Preferred order:
+    1. sibling module inside the current package, e.g. ``pokervision.decision_types``
+    2. top-level external module, e.g. ``decision_types``
+
+    This keeps the bridge compatible both with vendored-in solver files and with
+    the current external-file layout used by the project.
+    """
+    candidates: list[str] = []
+    if __package__:
+        candidates.append(f"{__package__}.{module_name}")
+    candidates.append(module_name)
+
+    last_error: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            return importlib.import_module(candidate)
+        except Exception as exc:  # pragma: no cover - exercised by fallback tests
+            last_error = exc
+    if last_error is None:
+        raise ImportError(f"Could not import module: {module_name}")
+    raise last_error
+
+
 def _import_decision_types():
-    from decision_types import HeroDecision, PostflopContext, PreflopContext
-    return HeroDecision, PostflopContext, PreflopContext
+    module = _import_bridge_module("decision_types")
+    return module.HeroDecision, module.PostflopContext, module.PreflopContext
 
 
 def _solve_hero_preflop(context):
-    from hero_decision import solve_hero_preflop
-    return solve_hero_preflop(context)
+    module = _import_bridge_module("hero_decision")
+    return module.solve_hero_preflop(context)
 
 
 def _solve_hero_postflop(context, **kwargs):
-    from hero_decision import solve_hero_postflop
-    return solve_hero_postflop(context, **kwargs)
+    module = _import_bridge_module("hero_decision")
+    return module.solve_hero_postflop(context, **kwargs)
 
 
 @dataclass(slots=True)
