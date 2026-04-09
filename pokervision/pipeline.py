@@ -19,7 +19,7 @@ from .hand_state import HandStateManager, MATCH_STRONG, MATCH_WEAK
 from .json_manager import save_hand_json
 from .models import BBox, Detection, FrameAnalysis, HandState
 from .render_state import build_render_state
-from .solver_bridge import build_recommendation
+from .solver_bridge import build_recommendation as build_solver_recommendation
 from .storage import StorageManager
 from .table_amount_logic import build_table_amount_state
 from .table_logic import assign_positions, determine_hero_position
@@ -533,14 +533,14 @@ class PokerVisionPipeline:
         # external launcher, otherwise main-pipeline semantics and persisted state drift again.
         solver_payload: Any = None
         try:
-            solver_payload = build_recommendation(analysis, hand, self.settings)
+            solver_result = build_solver_recommendation(analysis, hand, self.settings)
         except Exception as exc:  # pragma: no cover - defensive safety for runtime integration
             solver_payload = {
                 "status": "error",
                 "error": str(exc),
                 "result": None,
             }
-        legacy_solver_summary = _apply_solver_payload(analysis, hand, solver_payload)
+        legacy_solver_summary = _apply_solver_payload(analysis, hand, solver_result)
 
         repeated_same_street = (
             not created_new

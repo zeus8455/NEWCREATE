@@ -87,7 +87,7 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
     if hand.conflict_state:
         warnings.append(hand.conflict_state)
 
-    legacy_solver_annotation = _build_legacy_solver_annotation(hand)
+    solver_summary = _build_legacy_solver_annotation(hand)
 
     return RenderState(
         hand_id=hand.hand_id,
@@ -110,7 +110,7 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         action_annotations={
             "actions_log": list(hand.actions_log[-12:]),
             "last_actions_by_position": last_actions,
-            "solver_bridge": legacy_solver_annotation,
+            "solver_bridge": solver_summary,
         },
         advisor_input=dict(hand.advisor_input),
         engine_result=dict(hand.engine_result),
