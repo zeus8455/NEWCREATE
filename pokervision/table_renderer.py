@@ -145,77 +145,81 @@ class PokerTableWindow:  # pragma: no cover
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self.window)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        rect = self.window.rect()
-        painter.fillRect(rect, QtGui.QColor(24, 44, 24))
+        try:
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            rect = self.window.rect()
+            painter.fillRect(rect, QtGui.QColor(24, 44, 24))
 
-        table_rect = QtCore.QRect(120, 110, rect.width() - 240, rect.height() - 240)
-        painter.setBrush(QtGui.QBrush(QtGui.QColor(30, 92, 36)))
-        painter.setPen(QtGui.QPen(QtGui.QColor(220, 220, 220), 3))
-        painter.drawEllipse(table_rect)
+            table_rect = QtCore.QRect(120, 110, rect.width() - 240, rect.height() - 240)
+            painter.setBrush(QtGui.QBrush(QtGui.QColor(30, 92, 36)))
+            painter.setPen(QtGui.QPen(QtGui.QColor(220, 220, 220), 3))
+            painter.drawEllipse(table_rect)
 
-        _, render_state, _ = self.shared_state.snapshot()
-        if not render_state:
-            painter.setPen(QtGui.QColor(240, 240, 240))
-            painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, "Waiting for render_state")
-            return
+            _, render_state, _ = self.shared_state.snapshot()
+            if not render_state:
+                painter.setPen(QtGui.QColor(240, 240, 240))
+                painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, "Waiting for render_state")
+                return
 
-        painter.setPen(QtGui.QColor(255, 255, 255))
-        painter.drawText(20, 28, f"Hand: {render_state['hand_id']}")
-        painter.drawText(20, 50, f"Street: {render_state['street']}")
-        painter.drawText(20, 72, f"Status: {render_state['status']} / {render_state['freshness']}")
-        painter.drawText(20, 94, f"Players: {render_state['player_count']} ({render_state['table_format']})")
-        if render_state.get("warnings"):
-            painter.drawText(20, 116, f"Warning: {render_state['warnings'][0]}")
+            painter.setPen(QtGui.QColor(255, 255, 255))
+            painter.drawText(20, 28, f"Hand: {render_state['hand_id']}")
+            painter.drawText(20, 50, f"Street: {render_state['street']}")
+            painter.drawText(20, 72, f"Status: {render_state['status']} / {render_state['freshness']}")
+            painter.drawText(20, 94, f"Players: {render_state['player_count']} ({render_state['table_format']})")
+            if render_state.get("warnings"):
+                painter.drawText(20, 116, f"Warning: {render_state['warnings'][0]}")
 
-        table_amount_state = render_state.get("table_amount_state", {}) if isinstance(render_state.get("table_amount_state", {}), dict) else {}
-        total_pot = table_amount_state.get("total_pot", {}) if isinstance(table_amount_state, dict) else {}
-        if total_pot.get("amount_bb") is not None:
-            painter.drawText(rect.width() - 210, 28, f"Pot: {float(total_pot['amount_bb']):.1f} BB")
+            table_amount_state = render_state.get("table_amount_state", {}) if isinstance(render_state.get("table_amount_state", {}), dict) else {}
+            total_pot = table_amount_state.get("total_pot", {}) if isinstance(table_amount_state, dict) else {}
+            if total_pot.get("amount_bb") is not None:
+                painter.drawText(rect.width() - 210, 28, f"Pot: {float(total_pot['amount_bb']):.1f} BB")
 
-        blind_labels: Dict[str, str] = {}
-        posted_blinds = table_amount_state.get("posted_blinds", {}) if isinstance(table_amount_state, dict) else {}
-        for blind_name, payload in posted_blinds.items():
-            pos = payload.get("matched_position") or blind_name
-            amount = payload.get("amount_bb")
-            if amount is not None:
-                blind_labels[pos] = f"{blind_name} {float(amount):g}"
+            blind_labels: Dict[str, str] = {}
+            posted_blinds = table_amount_state.get("posted_blinds", {}) if isinstance(table_amount_state, dict) else {}
+            for blind_name, payload in posted_blinds.items():
+                pos = payload.get("matched_position") or blind_name
+                amount = payload.get("amount_bb")
+                if amount is not None:
+                    blind_labels[pos] = f"{blind_name} {float(amount):g}"
 
-        player_count = int(render_state["player_count"])
-        ordered_positions = self._ordered_positions(render_state)
-        slots = DISPLAY_SLOTS[player_count]
-        player_boxes = {}
-        for pos_name, slot in zip(ordered_positions, slots):
-            payload = render_state["players"].get(pos_name, {})
-            center_xy = (int(slot[0] * rect.width()), int(slot[1] * rect.height()))
-            player_boxes[pos_name] = self._draw_player(painter, rect, pos_name, payload, center_xy, blind_labels.get(pos_name))
+            player_count = int(render_state["player_count"])
+            ordered_positions = self._ordered_positions(render_state)
+            slots = DISPLAY_SLOTS[player_count]
+            player_boxes = {}
+            for pos_name, slot in zip(ordered_positions, slots):
+                payload = render_state["players"].get(pos_name, {})
+                center_xy = (int(slot[0] * rect.width()), int(slot[1] * rect.height()))
+                player_boxes[pos_name] = self._draw_player(painter, rect, pos_name, payload, center_xy, blind_labels.get(pos_name))
 
-        board_cards = render_state.get("board_cards", [])
-        board_w = len(board_cards) * 82 - (8 if board_cards else 0)
-        bx = rect.width() // 2 - board_w // 2
-        by = rect.height() // 2 - 54
-        for idx, card in enumerate(board_cards):
-            self._draw_card_pixmap(painter, render_card(card), bx + idx * 82, by)
+            board_cards = render_state.get("board_cards", [])
+            board_w = len(board_cards) * 82 - (8 if board_cards else 0)
+            bx = rect.width() // 2 - board_w // 2
+            by = rect.height() // 2 - 54
+            for idx, card in enumerate(board_cards):
+                self._draw_card_pixmap(painter, render_card(card), bx + idx * 82, by)
 
-        hero_position = render_state.get("hero_position")
-        hero_cards = render_state.get("hero_cards", [])
-        hero_payload = render_state.get("players", {}).get(hero_position, {})
-        hero_box = player_boxes.get(hero_position)
-        if hero_cards and hero_box and not hero_payload.get("is_fold", False):
-            card_h = 104
-            total_w = len(hero_cards) * 82 - 8
-            hx = hero_box["center_x"] - total_w // 2
-            hy = hero_box["box_y"] - card_h - 18
-            hy = max(145, hy)
-            for idx, card in enumerate(hero_cards):
-                self._draw_card_pixmap(painter, render_card(card), hx + idx * 82, hy)
+            hero_position = render_state.get("hero_position")
+            hero_cards = render_state.get("hero_cards", [])
+            hero_payload = render_state.get("players", {}).get(hero_position, {})
+            hero_box = player_boxes.get(hero_position)
+            if hero_cards and hero_box and not hero_payload.get("is_fold", False):
+                card_h = 104
+                total_w = len(hero_cards) * 82 - 8
+                hx = hero_box["center_x"] - total_w // 2
+                hy = hero_box["box_y"] - card_h - 18
+                hy = max(145, hy)
+                for idx, card in enumerate(hero_cards):
+                    self._draw_card_pixmap(painter, render_card(card), hx + idx * 82, hy)
 
-        if self.settings.show_last_action_labels:
-            actions = render_state.get("action_annotations", {}).get("actions_log", [])[-4:]
-            y = rect.height() - 70
-            for action in actions:
-                action_text = f"{action.get('street', '').upper()} {action.get('position', '')}: {action.get('action', '')}"
-                if action.get("amount_bb") not in (None, 0, 0.0):
-                    action_text += f" {float(action['amount_bb']):.1f}"
-                painter.drawText(20, y, action_text)
-                y += 18
+            if getattr(self.settings, "show_last_action_labels", True):
+                actions = render_state.get("action_annotations", {}).get("actions_log", [])[-4:]
+                y = rect.height() - 70
+                for action in actions:
+                    action_text = f"{action.get('street', '').upper()} {action.get('position', '')}: {action.get('action', '')}"
+                    if action.get("amount_bb") not in (None, 0, 0.0):
+                        action_text += f" {float(action['amount_bb']):.1f}"
+                    painter.drawText(20, y, action_text)
+                    y += 18
+        finally:
+            if painter.isActive():
+                painter.end()

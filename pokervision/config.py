@@ -13,6 +13,7 @@ class Settings:
     mock_table_size: tuple[int, int] = (1280, 720)
     frame_debounce_ms: int = 250
     ui_refresh_ms: int = 400
+    show_last_action_labels: bool = True
     hand_stale_timeout_sec: float = 12.0
     hand_close_timeout_sec: float = 30.0
     keep_temp_on_exit: bool = False
