@@ -13,6 +13,7 @@ __all__ = [
     "json_manager",
     "storage",
     "render_state",
+    "context_projection",
     "ui_bridge",
     "visualizer",
     "table_renderer",
