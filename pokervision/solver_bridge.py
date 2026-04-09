@@ -912,19 +912,38 @@ class EngineBridge:
 
         villain_positions = list(getattr(context, "villain_positions", []) or [])
         hero_in_position = self._hero_in_position_postflop(hand)
-        villain_postflop_players = self._build_villain_postflop_players(hand, street)
+        board_now = list(getattr(context, "board", []) or [])
+        full_runout_available = len(board_now) == 5
+
+        # CRITICAL INVARIANT:
+        # The external postflop range-builder currently requires a full 5-card
+        # board_runout when villain_postflop_players are used. On flop/turn we
+        # only know the current board (3 or 4 cards), so sending
+        # villain_postflop_players first would create a false solver error even
+        # though the hero decision can still be computed from preflop spots.
+        #
+        # Therefore:
+        # - river (5 cards): prefer villain_postflop_players with full runout
+        # - flop/turn (3/4 cards): skip that path and use villain_preflop_spots
+        #   directly, avoiding noisy "board_runout должен содержать ровно 5 карт"
+        #   errors for otherwise valid runtime spots.
         result = None
         warning_messages: List[str] = []
-        try:
-            result = _solve_hero_postflop(
-                context,
-                villain_postflop_players=villain_postflop_players,
-                hero_in_position=hero_in_position,
-                trials=6000,
-                seed=42,
-            )
-        except Exception as exc:
-            warning_messages.append(str(exc))
+
+        if full_runout_available:
+            try:
+                villain_postflop_players = self._build_villain_postflop_players(hand, street)
+                result = _solve_hero_postflop(
+                    context,
+                    villain_postflop_players=villain_postflop_players,
+                    hero_in_position=hero_in_position,
+                    trials=6000,
+                    seed=42,
+                )
+            except Exception as exc:
+                warning_messages.append(str(exc))
+
+        if result is None:
             try:
                 villain_preflop_spots = self._build_villain_preflop_spots(hand)
                 result = _solve_hero_postflop(
