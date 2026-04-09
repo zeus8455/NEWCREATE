@@ -361,6 +361,8 @@ class FrameAnalysis:
     solver_errors: List[str] = field(default_factory=list)
     hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
     solver_fingerprint_preview: Optional[str] = None
+    solver_result_reused: bool = False
+    solver_reuse_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         street = self.street or "preflop"
@@ -418,6 +420,8 @@ class FrameAnalysis:
             "solver_errors": list(self.solver_errors),
             "hero_decision_debug": deepcopy(self.hero_decision_debug),
             "solver_fingerprint_preview": self.solver_fingerprint_preview,
+            "solver_result_reused": self.solver_result_reused,
+            "solver_reuse_reason": self.solver_reuse_reason,
         }
 
 
