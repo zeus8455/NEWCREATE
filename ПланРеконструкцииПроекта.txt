@@ -34,3 +34,136 @@ SB first-in limp -> BB check;
 CO open -> BTN 3bet -> SB cold_4bet;
 Постфлоп pot_before=6, increment=4 -> 66.67%;
 один и тот же hand при тех же hero_cards, но шумном player_count/occupied_positions, не должен пересоздаваться. Эти тесты должны бить не по UI, а по reconstruction layer и solver projection layer.
+
+
+
+
+
+
+
+ПОДШАГИ ШАГА 5
+
+
+1. Вынести bridge как отдельный модуль без UI-мусора
+
+Создать pokervision/solver_bridge.py и перенести туда из launcher только solver-часть:
+
+ActorFlags
+ReplayState
+SpotDescription
+EngineBridge
+hand/action_state
+build_recommendation()
+_build_preflop_recommendation()
+_build_postflop_recommendation()
+
+Не переносить из launcher:
+
+UI/Qt
+отрисовку
+CLI/debug-print логику
+всё, что не нужно для принятия решения
+
+Цель — сделать bridge “тонким адаптером” между hand/action_state и decision-layer, а не вторым приложением.
+
+2. Не переписывать бизнес-логику bridge, а только перепривязать импорт и входы
+
+Я не буду заново выдумывать solver-логику. Правильнее почти дословно перенести существующий EngineBridge, но:
+
+заменить импорты на package-safe (from .solver_bridge import ... внутри проекта, либо аккуратные fallback-импорты для корневых decision_types.py, hero_decision.py и т.д.)
+сделать входом analysis и hand из pokervision, а не launcher-specific state
+оставить decision_types как официальный контракт между слоями
+
+Так сохраняется совместимость с уже работающими PreflopContext/PostflopContext/HeroDecision.
+
+3. Встроить вызов bridge ровно в нужную точку пайплайна
+
+Точка интеграции должна быть именно там, где ты и зафиксировал:
+
+после hand, decision, created_new = self.hand_manager.update_or_create(analysis)
+до build_render_state(...)
+
+То есть новая цепочка в pipeline.py будет:
+frame analysis -> amount normalization -> action reconstruction -> hand_manager.update_or_create -> solver_bridge.build_recommendation(analysis, hand) -> сохранить результат в hand -> build_render_state -> save_render_state -> save_hand_json
+
+Это убирает дублирование семантики между “основным пайплайном” и внешним launcher. Сейчас это место в коде уже хорошо выделено.
+
+4. Добавить нормализованные solver-поля в модели, а не лепить их как случайные dict
+
+сейчас HandState уже хранит table_amount_state, amount_normalization, action_state, actions_log, render_state_snapshot. Для шага 5 нужно расширить его ещё на стабильные блоки:
+
+advisor_input
+engine_result
+solver_context
+solver_status
+solver_errors
+hero_decision_debug
+
+Аналогично FrameAnalysis стоит расширить хотя бы полями:
+
+solver_context_preview
+solver_result
+solver_status
+
+Это важно, чтобы solver стал частью официальной модели состояния, а не временным side-effect. Сейчас HandState уже готов к такому расширению архитектурно.
+
+5. Официально проецировать префлоп и постфлоп в два контракта
+
+В bridge должен быть отдельный слой перевода из hand/action_state в контекст движка.
+
+Для preflop:
+
+брать hero_context_preview / node_type_preview
+брать opener_pos, three_bettor_pos, four_bettor_pos, limpers, callers
+брать полный action_history
+строить PreflopContext
+
+Для postflop:
+
+использовать board_cards, hero_cards
+вычислять pot_before_hero, to_call, effective_stack
+собирать villain_positions
+собирать line_context
+строить PostflopContext
+
+Это уже согласовано с загруженными decision-layer файлами: именно такие поля ждут PreflopContext и PostflopContext.
+
+6. Сначала сделать solver persistence, потом UI
+
+На шаге 5 UI не должен быть главным. Сначала bridge должен стабильно:
+
+вернуть HeroDecision или fallback
+записать в hand.json:
+advisor_input
+solver_input
+solver_output
+engine_result
+solver_status
+добавить в render_state базовые поля:
+recommended_action
+recommended_amount_to
+recommended_size_pct
+node_type
+engine_status
+
+Только после этого UI будет что показывать. Сейчас render_state.py этого ещё не содержит.
+
+7. Сразу заложить защиту от повторного решения на одном и том же кадре/состоянии
+
+Так как main.py просто берёт result.render_state из pipeline.process_frame(frame) и пушит его в UI, bridge нужно интегрировать так, чтобы:
+
+repeated same-street frame не порождал бессмысленный новый solver-run при неизменной ситуации
+либо solver-run происходил, но результат дедуплицировался
+либо сохранялся статус reused_previous_solver_result
+
+Это важно, потому что у тебя уже есть механика repeated same-street/save-only-raw в pipeline, и solver не должен начать спамить пересчётами.
+
+8. Нужны отдельные тесты именно на bridge, а не только на reconstruction
+
+Минимальный тестовый пакет шага 5:
+
+Preflop: open -> call -> 3bet -> fold opener должен дать корректный PreflopContext
+Preflop: node_type_preview из action_inference должен совпадать с solver_input.node_type
+postflop: на turn и river должен собираться валидный PostflopContext
+bridge не должен падать, если solver не смог собрать диапазон
+repeated frame не должен плодить разные solver outputs без изменения входа
