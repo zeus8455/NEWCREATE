@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Optional
 
 import cv2
@@ -19,7 +19,7 @@ from .hand_state import HandStateManager, MATCH_STRONG, MATCH_WEAK
 from .json_manager import save_hand_json
 from .models import BBox, Detection, FrameAnalysis, HandState
 from .render_state import build_render_state
-from .solver_bridge import build_recommendation as build_solver_recommendation
+from .solver_bridge import build_recommendation
 from .storage import StorageManager
 from .table_amount_logic import build_table_amount_state
 from .table_logic import assign_positions, determine_hero_position
@@ -39,42 +39,21 @@ class PipelineResult:
     render_state: Optional[dict]
 
 
-def _draw_detections(
-    image: np.ndarray,
-    detections: list[Detection],
-    color: tuple[int, int, int] = (0, 255, 255),
-) -> np.ndarray:
+def _draw_detections(image: np.ndarray, detections: list[Detection], color=(0, 255, 255)) -> np.ndarray:
     out = image.copy()
     for det in detections:
-        x1, y1, x2, y2 = map(
-            int,
-            [det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2],
-        )
+        x1, y1, x2, y2 = map(int, [det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2])
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(
-            out,
-            det.label,
-            (x1, max(12, y1 - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            color,
-            2,
-        )
+        cv2.putText(out, det.label, (x1, max(12, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
     return out
 
 
 def _region_key(det: Detection) -> str:
     bbox = det.bbox
-    return (
-        f"{det.label}@"
-        f"{round(bbox.x1, 1)}:{round(bbox.y1, 1)}:{round(bbox.x2, 1)}:{round(bbox.y2, 1)}"
-    )
+    return f"{det.label}@{round(bbox.x1, 1)}:{round(bbox.y1, 1)}:{round(bbox.x2, 1)}:{round(bbox.y2, 1)}"
 
 
-def _localize(
-    global_detections: list[Detection],
-    origin: tuple[int, int],
-) -> list[Detection]:
+def _localize(global_detections: list[Detection], origin: tuple[int, int]) -> list[Detection]:
     ox, oy = origin
     localized: list[Detection] = []
     for d in global_detections:
@@ -88,72 +67,180 @@ def _localize(
     return localized
 
 
-def _normalize_solver_payload(result: Any) -> dict[str, Any]:
-    if result is None:
-        return {}
-    if isinstance(result, dict):
-        return dict(result)
+def _safe_jsonable(value: Any, *, depth: int = 0) -> Any:
+    if depth > 5:
+        return repr(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _safe_jsonable(v, depth=depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_jsonable(v, depth=depth + 1) for v in value]
+    if is_dataclass(value):
+        return {f.name: _safe_jsonable(getattr(value, f.name), depth=depth + 1) for f in fields(value)}
+    if hasattr(value, "__dict__"):
+        return {
+            str(k): _safe_jsonable(v, depth=depth + 1)
+            for k, v in vars(value).items()
+            if not str(k).startswith("_")
+        }
+    return repr(value)
 
-    payload: dict[str, Any] = {
-        "type": type(result).__name__,
-        "raw_repr": repr(result),
+
+def _build_legacy_solver_summary(payload: Any, status: str, errors: list[str]) -> dict[str, Any]:
+    result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
+    summary = {
+        "status": status,
+        "result": {
+            "type": type(result_obj).__name__ if result_obj is not None else "NoneType",
+            "raw_repr": repr(result_obj) if result_obj is not None else "",
+        },
     }
-    for attr in (
-        "street",
-        "engine_action",
-        "amount_to",
-        "size_pct",
-        "actor_name",
-        "actor_pos",
-        "reason",
-        "confidence",
-        "source",
-        "debug",
-    ):
-        if hasattr(result, attr):
-            payload[attr] = getattr(result, attr)
+    if errors:
+        summary["errors"] = list(errors)
+    return summary
 
-    for nested_name in ("preflop", "postflop"):
-        nested = getattr(result, nested_name, None)
-        if nested is not None:
-            nested_payload = {
-                key: getattr(nested, key)
-                for key in (
-                    "action",
-                    "hand_class",
-                    "actor_name",
-                    "actor_pos",
-                    "is_mixed_action",
-                    "matching_actions",
-                    "selected_range_expr",
-                    "action_map",
-                    "amount_to",
-                    "size_pct",
-                    "fallback_reason",
-                    "meta",
-                    "street",
-                    "hero_equity",
-                    "realized_equity",
-                    "report",
-                )
-                if hasattr(nested, key)
+
+def _build_solver_context_preview(analysis: FrameAnalysis, hand: HandState) -> dict[str, Any]:
+    action_state = hand.action_state or {}
+    preview: dict[str, Any] = {
+        "street": analysis.street,
+        "hero_position": hand.hero_position,
+        "hero_cards": list(hand.hero_cards),
+        "board_cards": list(hand.board_cards),
+        "player_count": hand.player_count,
+        "table_format": hand.table_format,
+        "node_type_preview": action_state.get("node_type_preview"),
+        "hero_context_preview": _safe_jsonable(action_state.get("hero_context_preview", {})),
+        "action_history": _safe_jsonable(action_state.get("action_history", [])),
+    }
+    if analysis.street != "preflop":
+        amount_norm = hand.amount_normalization or {}
+        active_positions = [
+            pos
+            for pos, state in (hand.player_states or {}).items()
+            if pos != hand.hero_position and not bool(state.get("is_fold", False))
+        ]
+        preview.update(
+            {
+                "pot_before_hero": amount_norm.get("total_pot_bb"),
+                "villain_positions": active_positions,
             }
-            payload[nested_name] = nested_payload
+        )
+    return preview
 
-    villain_sources = getattr(result, "villain_sources", None)
-    if villain_sources is not None:
-        payload["villain_sources"] = [repr(source) for source in villain_sources]
-    return payload
+
+def _build_advisor_input(analysis: FrameAnalysis, hand: HandState, solver_context: dict[str, Any]) -> dict[str, Any]:
+    action_state = hand.action_state or {}
+    amount_norm = hand.amount_normalization or {}
+    if analysis.street == "preflop":
+        hero_preview = action_state.get("hero_context_preview", {}) or {}
+        return {
+            "context_type": "PreflopContext",
+            "hero_hand": list(hand.hero_cards),
+            "hero_pos": hand.hero_position,
+            "node_type": action_state.get("node_type_preview"),
+            "opener_pos": hero_preview.get("opener_pos") or action_state.get("opener_pos"),
+            "three_bettor_pos": hero_preview.get("three_bettor_pos") or action_state.get("three_bettor_pos"),
+            "four_bettor_pos": hero_preview.get("four_bettor_pos") or action_state.get("four_bettor_pos"),
+            "limpers": hero_preview.get("limpers", action_state.get("limpers", 0)),
+            "callers": hero_preview.get("callers", action_state.get("callers_after_open", 0)),
+            "action_history": _safe_jsonable(action_state.get("action_history", [])),
+            "meta": _safe_jsonable(hero_preview.get("meta", {})),
+        }
+    return {
+        "context_type": "PostflopContext",
+        "hero_hand": list(hand.hero_cards),
+        "board": list(hand.board_cards),
+        "pot_before_hero": amount_norm.get("total_pot_bb"),
+        "to_call": solver_context.get("to_call", 0.0),
+        "effective_stack": solver_context.get("effective_stack"),
+        "hero_position": hand.hero_position,
+        "villain_positions": list(solver_context.get("villain_positions", [])),
+        "street": analysis.street,
+        "player_count": hand.player_count,
+        "line_context": _safe_jsonable(action_state.get("line_context", {})),
+    }
+
+
+def _build_engine_result_from_payload(payload: Any, status: str) -> dict[str, Any]:
+    result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
+    if result_obj is None:
+        return {"status": status}
+    return {
+        "status": status,
+        "decision_type": type(result_obj).__name__,
+        "street": getattr(result_obj, "street", None),
+        "engine_action": getattr(result_obj, "engine_action", None),
+        "amount_to": getattr(result_obj, "amount_to", None),
+        "size_pct": getattr(result_obj, "size_pct", None),
+        "reason": getattr(result_obj, "reason", None),
+        "confidence": getattr(result_obj, "confidence", None),
+        "source": getattr(result_obj, "source", None),
+        "actor_name": getattr(result_obj, "actor_name", None),
+        "actor_pos": getattr(result_obj, "actor_pos", None),
+    }
+
+
+def _build_hero_decision_debug_from_payload(payload: Any, status: str, errors: list[str]) -> dict[str, Any]:
+    result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
+    debug = {
+        "status": status,
+        "type": type(result_obj).__name__ if result_obj is not None else "NoneType",
+        "raw_repr": repr(result_obj) if result_obj is not None else "",
+        "source": getattr(result_obj, "source", None) if result_obj is not None else None,
+        "confidence": getattr(result_obj, "confidence", None) if result_obj is not None else None,
+        "reason": getattr(result_obj, "reason", None) if result_obj is not None else None,
+        "preflop": _safe_jsonable(getattr(result_obj, "preflop", None)) if result_obj is not None else None,
+        "postflop": _safe_jsonable(getattr(result_obj, "postflop", None)) if result_obj is not None else None,
+    }
+    if errors:
+        debug["errors"] = list(errors)
+    return debug
+
+
+def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any) -> dict[str, Any]:
+    """Populate stable solver fields on analysis/hand and return a legacy summary.
+
+    CRITICAL INVARIANT:
+    Solver output must live in normalized model fields, not only inside
+    processing_summary/action_annotations. Keep the legacy summary for backwards
+    compatibility, but treat HandState/RenderState solver fields as the source of truth.
+    """
+    status = "ok"
+    errors: list[str] = []
+    if isinstance(payload, dict):
+        status = str(payload.get("status") or "ok")
+        if payload.get("errors"):
+            errors.extend([str(item) for item in payload.get("errors", [])])
+        if payload.get("error"):
+            errors.append(str(payload.get("error")))
+    elif payload is None:
+        status = "not_run"
+
+    solver_context = _build_solver_context_preview(analysis, hand)
+    advisor_input = _build_advisor_input(analysis, hand, solver_context)
+    engine_result = _build_engine_result_from_payload(payload, status)
+    hero_debug = _build_hero_decision_debug_from_payload(payload, status, errors)
+    legacy_summary = _build_legacy_solver_summary(payload, status, errors)
+
+    analysis.solver_context_preview = dict(solver_context)
+    analysis.solver_result = dict(engine_result)
+    analysis.solver_status = status
+
+    hand.solver_context = dict(solver_context)
+    hand.advisor_input = dict(advisor_input)
+    hand.engine_result = dict(engine_result)
+    hand.solver_status = status
+    hand.solver_errors = list(errors)
+    hand.hero_decision_debug = dict(hero_debug)
+
+    hand.processing_summary["solver_bridge"] = dict(legacy_summary)
+    return legacy_summary
 
 
 class PokerVisionPipeline:
-    def __init__(
-        self,
-        settings: Settings,
-        detector_backend,
-        storage: StorageManager,
-        hand_manager: HandStateManager,
-    ):
+    def __init__(self, settings: Settings, detector_backend, storage: StorageManager, hand_manager: HandStateManager):
         self.settings = settings
         self.detector_backend = detector_backend
         self.storage = storage
@@ -163,7 +250,6 @@ class PokerVisionPipeline:
         self.hand_manager.mark_stale_if_needed(frame.timestamp)
         active = self.detector_backend.detect_active_hero(frame)
         overlay = _draw_detections(frame.image, active, color=(0, 255, 255))
-
         if not active:
             analysis = FrameAnalysis(frame.frame_id, frame.timestamp, False)
             return PipelineResult(
@@ -188,7 +274,6 @@ class PokerVisionPipeline:
             structure_detections=structure_dets,
             validation={"structure_ok": structure_val.ok},
         )
-
         if not structure_val.ok:
             analysis.errors.extend(structure_val.errors)
             self.storage.save_failure_artifacts(
@@ -238,11 +323,7 @@ class PokerVisionPipeline:
         street = str(street_val.meta["street"])
         analysis.street = street
         table_center, positions = assign_positions(seats, btn, player_count)
-        hero_position = determine_hero_position(
-            positions,
-            active,
-            self.settings.seat_match_max_distance_px,
-        )
+        hero_position = determine_hero_position(positions, active, self.settings.seat_match_max_distance_px)
         positions[hero_position]["is_hero"] = True
         occupied_positions = list(positions.keys())
         analysis.positions = positions
@@ -262,7 +343,6 @@ class PokerVisionPipeline:
             player_crops[position] = player_crop
             player_overlays[position] = player_overlay
             analysis.player_state_detections[position] = player_global_dets
-
             player_val = validate_player_state(
                 position,
                 player_local_dets,
@@ -407,12 +487,7 @@ class PokerVisionPipeline:
             else:
                 retry_ok = False
                 if self.settings.max_retry_per_stage > 0:
-                    expanded_marker = BBox(
-                        board_bbox.x1 - 20,
-                        board_bbox.y1 - 10,
-                        board_bbox.x2 + 20,
-                        board_bbox.y2 + 10,
-                    )
+                    expanded_marker = BBox(board_bbox.x1 - 20, board_bbox.y1 - 10, board_bbox.x2 + 20, board_bbox.y2 + 10)
                     retry_global = self.detector_backend.detect_board_cards(frame, expanded_marker, street)
                     retry_crop, retry_origin = build_board_crop(frame.image, expanded_marker, self.settings)
                     retry_local = _localize(retry_global, retry_origin)
@@ -438,8 +513,7 @@ class PokerVisionPipeline:
                         player_overlays=player_overlays,
                         table_amount_crops=table_amount_crops,
                         table_amount_overlays=table_amount_overlays,
-                        debug_images=[overlay, hero_overlay]
-                        + ([board_overlay] if board_overlay is not None else []),
+                        debug_images=[overlay, hero_overlay] + ([board_overlay] if board_overlay is not None else []),
                     )
                     self.hand_manager.register_error(
                         self.hand_manager.active_hand,
@@ -450,37 +524,23 @@ class PokerVisionPipeline:
                     )
                     return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
 
-        previous_street = (
-            self.hand_manager.active_hand.street_state.get("current_street")
-            if self.hand_manager.active_hand
-            else None
-        )
+        previous_street = self.hand_manager.active_hand.street_state.get("current_street") if self.hand_manager.active_hand else None
         hand, decision, created_new = self.hand_manager.update_or_create(analysis)
 
         # CRITICAL INVARIANT:
-        # The main pipeline must call solver_bridge only after HandState is updated from
-        # normalized analysis, and before build_render_state()/save_hand_json().
-        # If bridge invocation is moved back to the external launcher or after render-state
-        # generation, solver semantics will drift again between pipeline and launcher.
-        solver_payload: dict[str, Any] = {}
+        # The main pipeline must invoke the solver bridge after HandState is updated and
+        # before RenderState/hand.json are built. Do not move this logic back into the
+        # external launcher, otherwise main-pipeline semantics and persisted state drift again.
+        solver_payload: Any = None
         try:
-            solver_result = build_solver_recommendation(analysis, hand, self.settings)
-            solver_payload = {
-                "status": "ok",
-                "result": _normalize_solver_payload(solver_result),
-            }
-            analysis.validation["solver_bridge_ok"] = True
-        except Exception as exc:  # pragma: no cover - defensive runtime path
+            solver_payload = build_recommendation(analysis, hand, self.settings)
+        except Exception as exc:  # pragma: no cover - defensive safety for runtime integration
             solver_payload = {
                 "status": "error",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": str(exc),
+                "result": None,
             }
-            analysis.validation["solver_bridge_ok"] = False
-            analysis.warnings.append(f"solver_bridge: {type(exc).__name__}: {exc}")
-
-        if not isinstance(hand.processing_summary, dict):
-            hand.processing_summary = {}
-        hand.processing_summary["solver_bridge"] = solver_payload
+        legacy_solver_summary = _apply_solver_payload(analysis, hand, solver_payload)
 
         repeated_same_street = (
             not created_new
@@ -488,7 +548,6 @@ class PokerVisionPipeline:
             and decision.status in {MATCH_STRONG, MATCH_WEAK}
         )
         save_only_raw = repeated_same_street and not self.settings.normal_mode_save_repeated_frames
-
         artifacts = self.storage.save_pipeline_artifacts(
             hand.hand_id,
             frame.frame_id,
@@ -510,6 +569,7 @@ class PokerVisionPipeline:
             save_only_raw=save_only_raw,
         )
         hand.artifacts = artifacts.to_dict()
+        hand.processing_summary["solver_bridge"] = dict(legacy_solver_summary)
 
         render_state = build_render_state(hand, frame.frame_id, frame.timestamp).to_dict()
         hand.render_state_snapshot = render_state

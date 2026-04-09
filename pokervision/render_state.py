@@ -15,13 +15,37 @@ def _build_display_seat_order(hand: HandState) -> list[str]:
     return available
 
 
+def _build_legacy_solver_annotation(hand: HandState) -> dict:
+    """Backward-compatible solver annotation.
+
+    CRITICAL INVARIANT:
+    The official solver state now lives in top-level normalized fields on
+    HandState/RenderState. This legacy payload is kept only so older UI/debug
+    code does not break while the project transitions away from ad-hoc dicts.
+    """
+    result = {
+        "status": hand.solver_status or "not_run",
+        "result": {
+            "type": str(hand.hero_decision_debug.get("type") or ""),
+            "raw_repr": str(hand.hero_decision_debug.get("raw_repr") or ""),
+        },
+    }
+    if hand.solver_errors:
+        result["errors"] = list(hand.solver_errors)
+    return result
+
+
 def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: str) -> RenderState:
     players = {}
     action_state = hand.action_state or {}
     last_actions = dict(action_state.get("last_actions_by_position", {}))
     bet_map = (hand.table_amount_state or {}).get("bets_by_position", {}) if isinstance(hand.table_amount_state, dict) else {}
     amount_norm = hand.amount_normalization or {}
-    normalized_street = amount_norm.get("final_contribution_street_bb_by_pos", {}) if isinstance(amount_norm, dict) else {}
+    normalized_street = (
+        amount_norm.get("final_contribution_street_bb_by_pos", {})
+        if isinstance(amount_norm, dict)
+        else {}
+    )
     seat_order = _build_display_seat_order(hand)
 
     for position in hand.occupied_positions:
@@ -63,9 +87,7 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
     if hand.conflict_state:
         warnings.append(hand.conflict_state)
 
-    solver_summary = {}
-    if isinstance(hand.processing_summary, dict):
-        solver_summary = dict(hand.processing_summary.get("solver_bridge", {}))
+    legacy_solver_annotation = _build_legacy_solver_annotation(hand)
 
     return RenderState(
         hand_id=hand.hand_id,
@@ -88,6 +110,12 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         action_annotations={
             "actions_log": list(hand.actions_log[-12:]),
             "last_actions_by_position": last_actions,
-            "solver_bridge": solver_summary,
+            "solver_bridge": legacy_solver_annotation,
         },
+        advisor_input=dict(hand.advisor_input),
+        engine_result=dict(hand.engine_result),
+        solver_context=dict(hand.solver_context),
+        solver_status=hand.solver_status,
+        solver_errors=list(hand.solver_errors),
+        hero_decision_debug=dict(hand.hero_decision_debug),
     )

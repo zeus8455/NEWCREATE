@@ -151,6 +151,10 @@ class FrameAnalysis:
     table_amount_state: Dict[str, Any] = field(default_factory=dict)
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_inference: Dict[str, Any] = field(default_factory=dict)
+    # Stable solver-layer preview fields.
+    solver_context_preview: Dict[str, Any] = field(default_factory=dict)
+    solver_result: Dict[str, Any] = field(default_factory=dict)
+    solver_status: str = "not_run"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -186,6 +190,9 @@ class FrameAnalysis:
             "table_amount_state": dict(self.table_amount_state),
             "amount_normalization": dict(self.amount_normalization),
             "action_inference": dict(self.action_inference),
+            "solver_context_preview": dict(self.solver_context_preview),
+            "solver_result": dict(self.solver_result),
+            "solver_status": self.solver_status,
         }
 
 
@@ -229,6 +236,13 @@ class HandState:
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_state: Dict[str, Any] = field(default_factory=dict)
     actions_log: List[Dict[str, Any]] = field(default_factory=list)
+    # Stable solver-layer state. These fields replace ad-hoc solver dict storage.
+    advisor_input: Dict[str, Any] = field(default_factory=dict)
+    engine_result: Dict[str, Any] = field(default_factory=dict)
+    solver_context: Dict[str, Any] = field(default_factory=dict)
+    solver_status: str = "not_run"
+    solver_errors: List[str] = field(default_factory=list)
+    hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -258,6 +272,12 @@ class HandState:
             "amount_normalization": dict(self.amount_normalization),
             "action_state": dict(self.action_state),
             "actions_log": list(self.actions_log),
+            "advisor_input": dict(self.advisor_input),
+            "engine_result": dict(self.engine_result),
+            "solver_context": dict(self.solver_context),
+            "solver_status": self.solver_status,
+            "solver_errors": list(self.solver_errors),
+            "hero_decision_debug": dict(self.hero_decision_debug),
         }
 
 
@@ -281,6 +301,12 @@ class RenderState:
     table_amount_state: Dict[str, Any] = field(default_factory=dict)
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_annotations: Dict[str, Any] = field(default_factory=dict)
+    advisor_input: Dict[str, Any] = field(default_factory=dict)
+    engine_result: Dict[str, Any] = field(default_factory=dict)
+    solver_context: Dict[str, Any] = field(default_factory=dict)
+    solver_status: str = "not_run"
+    solver_errors: List[str] = field(default_factory=list)
+    hero_decision_debug: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
