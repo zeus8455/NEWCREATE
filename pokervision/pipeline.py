@@ -531,11 +531,11 @@ class PokerVisionPipeline:
         # The main pipeline must invoke the solver bridge after HandState is updated and
         # before RenderState/hand.json are built. Do not move this logic back into the
         # external launcher, otherwise main-pipeline semantics and persisted state drift again.
-        solver_payload: Any = None
+        solver_result: Any = None
         try:
             solver_result = build_solver_recommendation(analysis, hand, self.settings)
         except Exception as exc:  # pragma: no cover - defensive safety for runtime integration
-            solver_payload = {
+            solver_result = {
                 "status": "error",
                 "error": str(exc),
                 "result": None,
