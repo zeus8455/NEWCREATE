@@ -87,20 +87,6 @@ def _safe_jsonable(value: Any, *, depth: int = 0) -> Any:
     return repr(value)
 
 
-def _build_legacy_solver_summary(payload: Any, status: str, errors: list[str], warnings: list[str]) -> dict[str, Any]:
-    result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
-    summary = {
-        "status": status,
-        "result": {
-            "type": type(result_obj).__name__ if result_obj is not None else "NoneType",
-            "raw_repr": repr(result_obj) if result_obj is not None else "",
-        },
-    }
-    if warnings:
-        summary["warnings"] = list(warnings)
-    if errors:
-        summary["errors"] = list(errors)
-    return summary
 
 
 def _build_solver_context_preview_fallback(analysis: FrameAnalysis, hand: HandState) -> dict[str, Any]:
@@ -231,13 +217,15 @@ def _build_hero_decision_debug_from_payload(payload: Any, status: str, errors: l
     return debug
 
 
-def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any) -> dict[str, Any]:
-    """Populate stable solver fields on analysis/hand and return a legacy summary.
+def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any) -> None:
+    """Populate the canonical solver contract on analysis/hand.
 
     CRITICAL INVARIANT:
-    Solver output must live in normalized model fields, not only inside
-    processing_summary/action_annotations. Keep the legacy summary for backwards
-    compatibility, but treat HandState/RenderState solver fields as the source of truth.
+    Solver output must live in one official location only: the dedicated solver
+    fields on HandState/RenderState. Do not mirror the same payload back into
+    processing_summary or action_annotations under legacy ad-hoc keys such as
+    ``solver_bridge``. That duplication creates two competing JSON contracts and
+    makes old noise look like fresh solver state.
     """
     status = "ok"
     errors: list[str] = []
@@ -265,8 +253,6 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
         warnings.extend([str(item) for item in payload.get("warnings", [])])
     engine_result = _build_engine_result_from_payload(payload, status)
     hero_debug = _build_hero_decision_debug_from_payload(payload, status, errors, warnings)
-    legacy_summary = _build_legacy_solver_summary(payload, status, errors, warnings)
-
     analysis.solver_context_preview = dict(solver_context)
     analysis.solver_result = dict(engine_result)
     analysis.solver_status = status
@@ -282,8 +268,10 @@ def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any
     hand.solver_errors = list(errors)
     hand.hero_decision_debug = dict(hero_debug)
 
-    hand.processing_summary["solver_bridge"] = dict(legacy_summary)
-    return legacy_summary
+    # Remove any stale duplicated solver payload left by older builds so the
+    # next hand.json/save cycle keeps only the canonical top-level solver fields.
+    hand.processing_summary.pop("solver_bridge", None)
+    return None
 
 
 class PokerVisionPipeline:
@@ -587,7 +575,7 @@ class PokerVisionPipeline:
                 "error": str(exc),
                 "result": None,
             }
-        legacy_solver_summary = _apply_solver_payload(analysis, hand, solver_result)
+        _apply_solver_payload(analysis, hand, solver_result)
 
         repeated_same_street = (
             not created_new
@@ -616,7 +604,7 @@ class PokerVisionPipeline:
             save_only_raw=save_only_raw,
         )
         hand.artifacts = artifacts.to_dict()
-        hand.processing_summary["solver_bridge"] = dict(legacy_solver_summary)
+        hand.processing_summary.pop("solver_bridge", None)
 
         render_state = build_render_state(hand, frame.frame_id, frame.timestamp).to_dict()
         hand.render_state_snapshot = render_state

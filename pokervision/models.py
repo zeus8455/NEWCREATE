@@ -238,7 +238,9 @@ class HandState:
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
     action_state: Dict[str, Any] = field(default_factory=dict)
     actions_log: List[Dict[str, Any]] = field(default_factory=list)
-    # Stable solver-layer state. These fields replace ad-hoc solver dict storage.
+    # Stable solver-layer state. These top-level fields are the ONLY canonical
+    # solver persistence contract for hand.json. Do not duplicate the same data
+    # back into processing_summary or other legacy ad-hoc blocks.
     advisor_input: Dict[str, Any] = field(default_factory=dict)
     solver_input: Dict[str, Any] = field(default_factory=dict)
     solver_output: Dict[str, Any] = field(default_factory=dict)
@@ -308,6 +310,9 @@ class RenderState:
     seat_order: List[str] = field(default_factory=list)
     table_amount_state: Dict[str, Any] = field(default_factory=dict)
     amount_normalization: Dict[str, Any] = field(default_factory=dict)
+    # action_annotations is reserved for table/action UI context only. Solver
+    # state must stay in the dedicated top-level fields below, not in duplicated
+    # legacy nested payloads such as action_annotations["solver_bridge"].
     action_annotations: Dict[str, Any] = field(default_factory=dict)
     advisor_input: Dict[str, Any] = field(default_factory=dict)
     solver_input: Dict[str, Any] = field(default_factory=dict)

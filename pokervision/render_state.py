@@ -15,26 +15,24 @@ def _build_display_seat_order(hand: HandState) -> list[str]:
     return available
 
 
-def _build_legacy_solver_annotation(hand: HandState) -> dict:
-    """Backward-compatible solver annotation.
+def _clear_legacy_solver_annotation(action_annotations: dict) -> dict:
+    """Remove deprecated duplicated solver payload from action annotations.
 
     CRITICAL INVARIANT:
-    The official solver state now lives in top-level normalized fields on
-    HandState/RenderState. This legacy payload is kept only so older UI/debug
-    code does not break while the project transitions away from ad-hoc dicts.
+    Solver state in RenderState must have a single canonical location: the
+    dedicated top-level fields (advisor_input / solver_input / solver_output /
+    engine_result / solver_context / solver_status / solver_warnings /
+    solver_errors / hero_decision_debug).
+
+    Do not re-introduce action_annotations["solver_bridge"] here. It was a
+    temporary migration shim and caused the same solver payload to live in two
+    parallel JSON contracts.
     """
-    result = {
-        "status": hand.solver_status or "not_run",
-        "result": {
-            "type": str(hand.hero_decision_debug.get("type") or ""),
-            "raw_repr": str(hand.hero_decision_debug.get("raw_repr") or ""),
-        },
-    }
-    if hand.solver_warnings:
-        result["warnings"] = list(hand.solver_warnings)
-    if hand.solver_errors:
-        result["errors"] = list(hand.solver_errors)
-    return result
+    if not isinstance(action_annotations, dict):
+        return {}
+    cleaned = dict(action_annotations)
+    cleaned.pop("solver_bridge", None)
+    return cleaned
 
 
 def _derive_solver_ui_fields(hand: HandState) -> dict:
@@ -114,7 +112,6 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
     if hand.conflict_state:
         warnings.append(hand.conflict_state)
 
-    solver_summary = _build_legacy_solver_annotation(hand)
     solver_ui = _derive_solver_ui_fields(hand)
 
     return RenderState(
@@ -135,11 +132,10 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
         seat_order=seat_order,
         table_amount_state=dict(hand.table_amount_state),
         amount_normalization=dict(hand.amount_normalization),
-        action_annotations={
+        action_annotations=_clear_legacy_solver_annotation({
             "actions_log": list(hand.actions_log[-12:]),
             "last_actions_by_position": last_actions,
-            "solver_bridge": solver_summary,
-        },
+        }),
         advisor_input=dict(hand.advisor_input),
         solver_input=dict(hand.solver_input),
         solver_output=dict(hand.solver_output),
