@@ -346,8 +346,6 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         decorate_legacy_action_fields=_decorate_legacy_action_fields,
         legacy_last_action_display=_legacy_last_action_display,
         final_aggression_label=_final_aggression_label,
-        derive_node_type_preview=_derive_node_type_preview,
-        build_preflop_resolved_ledger=_build_preflop_resolved_ledger,
         same_hand_identity=_same_hand_identity,
         player_is_folded=_player_is_folded,
         eps=EPS,
@@ -358,6 +356,8 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         analysis=analysis,
         settings=settings,
         safe_float=_safe_float,
+        derive_node_type_preview=_derive_node_type_preview,
+        build_preflop_resolved_ledger=_build_preflop_resolved_ledger,
     )
 
 def _normalized_hero_cards_for_identity(cards: Any) -> tuple[str, ...]:
