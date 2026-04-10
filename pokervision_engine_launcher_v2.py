@@ -1060,6 +1060,98 @@ class EngineBridge:
             return self._build_preflop_analysis_text(decision, hand=hand)
         return self._build_postflop_analysis_text(decision, hand=hand)
 
+    def _resolve_state_analysis_context(self, render_state: dict, hand=None) -> Dict[str, Any]:
+        panel = render_state.get("analysis_panel") or {}
+        range_debug = render_state.get("range_debug") or {}
+        debug_payload = render_state.get("hero_decision_debug") or {}
+        debug = debug_payload.get("debug") if isinstance(debug_payload, dict) else {}
+        if not isinstance(debug, dict):
+            debug = {}
+        meta = range_debug.get("meta") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        return {
+            "street": str(render_state.get("street") or (getattr(hand, "street_state", {}) or {}).get("current_street") or "-"),
+            "recommended_action": str(render_state.get("recommended_action") or "NO DECISION"),
+            "reason": str(render_state.get("decision_reason") or ""),
+            "confidence": render_state.get("decision_confidence"),
+            "node_type": str(panel.get("node_type") or render_state.get("node_type") or meta.get("projection_node_type") or "-"),
+            "projection_node_type": str(panel.get("projection_node_type") or render_state.get("node_type") or meta.get("projection_node_type") or ""),
+            "advisor_node_type": str(panel.get("advisor_node_type") or meta.get("advisor_node_type") or debug.get("node_type") or ""),
+            "advisor_mapping_reason": str(panel.get("advisor_mapping_reason") or meta.get("advisor_mapping_reason") or ""),
+            "hero_position": str(render_state.get("hero_position") or getattr(hand, "hero_position", "-")),
+            "hero_cards": list(render_state.get("hero_cards") or getattr(hand, "hero_cards", []) or []),
+            "range_owner": str(debug.get("range_owner") or "hero"),
+            "hand_class": str(range_debug.get("hand_class") or "-"),
+            "description": str(meta.get("description") or ""),
+            "matching_actions": list(range_debug.get("matching_actions") or []),
+            "chosen_action": str(range_debug.get("action") or "-"),
+            "selected_range_expr": str(range_debug.get("selected_range_expr") or "-"),
+            "action_map": dict(range_debug.get("action_map") or {}),
+            "fallback_reason": range_debug.get("fallback_reason"),
+        }
+
+    def build_analysis_text_from_render_state(self, render_state: dict, hand=None) -> str:
+        ctx = self._resolve_state_analysis_context(render_state, hand=hand)
+        lines: List[str] = []
+        street = str(ctx["street"]).lower()
+        lines.append("=== PREFLOP ANALYSIS ===" if street == "preflop" else "=== POSTFLOP ANALYSIS ===")
+        lines.append(f"Recommendation: {ctx['recommended_action']}")
+        lines.append(f"Reason: {ctx['reason']}")
+        if ctx["confidence"] is not None:
+            lines.append(f"Confidence: {float(ctx['confidence']):.2f}")
+        lines.append("")
+        if hand is not None:
+            lines.append(f"Hand ID: {hand.hand_id}")
+        lines.append(f"Hero position (vision): {ctx['hero_position']}")
+        if ctx["hero_cards"]:
+            lines.append(f"Hero cards: {' '.join(ctx['hero_cards'])}")
+        lines.append("")
+        lines.append(f"Tree / node_type: {ctx['node_type']}")
+        if ctx["projection_node_type"] and ctx["advisor_node_type"] and ctx["projection_node_type"] != ctx["advisor_node_type"]:
+            lines.append(f"Advisor mapped node: {ctx['advisor_node_type']}")
+            if ctx["advisor_mapping_reason"]:
+                lines.append(f"Advisor mapping reason: {ctx['advisor_mapping_reason']}")
+        lines.append(f"Range owner: {ctx['range_owner']}")
+        lines.append(f"Hero hand class: {ctx['hand_class']}")
+        if ctx["description"]:
+            lines.append(f"Description: {ctx['description']}")
+        ma = ctx["matching_actions"]
+        lines.append(f"Matching actions: {', '.join(ma) if ma else '-'}")
+        lines.append(f"Chosen action: {ctx['chosen_action']}")
+        lines.append(f"Selected range expr: {ctx['selected_range_expr']}")
+        if ctx["fallback_reason"]:
+            lines.append(f"Fallback reason: {ctx['fallback_reason']}")
+        if ctx["action_map"]:
+            lines.append("")
+            lines.append("Action map / chart branches:")
+            for action_name, expr in ctx["action_map"].items():
+                lines.append(f" {action_name:<10} -> {expr}")
+        return "\n".join(lines)
+
+    def format_existing_render_state_for_ui(self, render_state: Optional[dict], hand=None) -> Optional[Dict[str, Any]]:
+        if not isinstance(render_state, dict):
+            return None
+        recommended_action = render_state.get("recommended_action")
+        decision_reason = render_state.get("decision_reason")
+        if not recommended_action and not decision_reason:
+            return None
+        title = str(recommended_action or "NO DECISION")
+        reason = str(decision_reason or "")
+        confidence = render_state.get("decision_confidence")
+        street = str(render_state.get("street") or (getattr(hand, "street_state", {}) or {}).get("current_street") or "")
+        return {
+            "title": title,
+            "action": title.lower(),
+            "reason": reason,
+            "street": street,
+            "confidence": confidence,
+            "size_pct": render_state.get("recommended_size_pct"),
+            "amount_to": render_state.get("recommended_amount_to"),
+            "debug": dict((((render_state.get("hero_decision_debug") or {}) if isinstance(render_state.get("hero_decision_debug"), dict) else {}).get("debug") or {})),
+            "analysis_text": self.build_analysis_text_from_render_state(render_state, hand=hand),
+        }
+
     def format_for_ui(self, decision: Optional[HeroDecision], hand=None) -> Dict[str, Any]:
         if decision is None:
             return {
@@ -1398,9 +1490,16 @@ class IntegratedRunner:
         recommendation_payload: Dict[str, Any]
         analysis_text = ""
         exception_text = ""
+        existing_render_state = None
+        if result.render_state:
+            existing_render_state = dict(result.render_state)
+        elif result.hand is not None and getattr(result.hand, "render_state_snapshot", None):
+            existing_render_state = dict(result.hand.render_state_snapshot)
         try:
-            decision = self.bridge.build_recommendation(result.analysis, result.hand)
-            recommendation_payload = self.bridge.format_for_ui(decision, result.hand)
+            recommendation_payload = self.bridge.format_existing_render_state_for_ui(existing_render_state, hand=result.hand) or {}
+            if not recommendation_payload:
+                decision = self.bridge.build_recommendation(result.analysis, result.hand)
+                recommendation_payload = self.bridge.format_for_ui(decision, result.hand)
             analysis_text = str(recommendation_payload.get("analysis_text") or "")
         except Exception:
             exception_text = traceback.format_exc(limit=8)
