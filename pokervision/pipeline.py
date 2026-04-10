@@ -505,11 +505,6 @@ class PokerVisionPipeline:
         if analysis.amount_normalization.get("warnings"):
             analysis.warnings.extend(list(analysis.amount_normalization.get("warnings", [])))
 
-        if self.settings.action_reconstruction_enabled:
-            analysis.action_inference = infer_actions(self.hand_manager.active_hand, analysis, self.settings)
-        else:
-            analysis.action_inference = {}
-
         hero_bbox = BBox(**positions[hero_position]["bbox"])
         hero_crop, hero_origin = build_hero_crop(frame.image, hero_bbox, self.settings)
         hero_card_dets = self.detector_backend.detect_hero_cards(frame, hero_bbox)
@@ -622,6 +617,17 @@ class PokerVisionPipeline:
                         True,
                     )
                     return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
+
+        # CRITICAL INVARIANT:
+        # Preflop/postflop action reconstruction may reuse state from the previous
+        # hand only after the current frame HERO cards / board have already been
+        # validated onto ``analysis``. Running infer_actions() earlier makes
+        # same-hand checks see empty hero_cards and forces the reconciler into
+        # frame_only_passthrough even for the same logical hand.
+        if self.settings.action_reconstruction_enabled:
+            analysis.action_inference = infer_actions(self.hand_manager.active_hand, analysis, self.settings)
+        else:
+            analysis.action_inference = {}
 
         previous_street = self.hand_manager.active_hand.street_state.get("current_street") if self.hand_manager.active_hand else None
         hand, decision, created_new = self.hand_manager.update_or_create(analysis)
