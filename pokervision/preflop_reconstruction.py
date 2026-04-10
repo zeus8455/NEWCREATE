@@ -515,6 +515,21 @@ def _append_unique_action(target: List[Dict[str, Any]], action: Dict[str, Any]) 
     return True
 
 
+def _renumber_action_orders(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for index, action in enumerate(list(actions or []), start=1):
+        payload = dict(action)
+        payload["order"] = index
+        normalized.append(payload)
+    return normalized
+
+
+def _actions_changed_from_frame_local(resolved_actions: List[Dict[str, Any]], frame_local_actions: List[Dict[str, Any]]) -> bool:
+    resolved_signatures = [_legacy_action_identity(item) for item in list(resolved_actions or [])]
+    frame_signatures = [_legacy_action_identity(item) for item in list(frame_local_actions or [])]
+    return resolved_signatures != frame_signatures
+
+
 def reconcile_preflop_with_hand(
     previous_hand: Any,
     current_frame_result: Dict[str, Any],
@@ -711,6 +726,7 @@ def reconcile_preflop_with_hand(
 
             reconciliation_applied = bool(appended_actions)
 
+    resolved_actions = _renumber_action_orders(resolved_actions)
     state_from_actions = _derive_preflop_state_from_actions(resolved_actions)
     limpers = list(state_from_actions.get("limpers") or [])
     opener_pos = state_from_actions.get("opener_pos")
@@ -746,6 +762,15 @@ def reconcile_preflop_with_hand(
     else:
         node_type_preview = result.get("node_type_preview")
 
+    projection_node_type = node_type_preview
+    advisor_node_type = node_type_preview
+    advisor_four_bettor_pos = four_bettor_pos
+    advisor_mapping_reason: Optional[str] = None
+    if node_type_preview == "fourbettor_vs_5bet":
+        advisor_node_type = "threebettor_vs_4bet"
+        advisor_four_bettor_pos = last_aggressor_position or three_bettor_pos
+        advisor_mapping_reason = "closest_supported_rereraise_defense_node"
+
     resolved_ledger: Dict[str, Any] = {}
     if build_preflop_resolved_ledger is not None:
         resolved_ledger = build_preflop_resolved_ledger(
@@ -771,7 +796,7 @@ def reconcile_preflop_with_hand(
             "street": "preflop",
             "source_mode": source_mode,
             "hero_position": hero_position,
-            "node_type": node_type_preview,
+            "node_type": projection_node_type,
             "opener_pos": opener_pos,
             "three_bettor_pos": three_bettor_pos,
             "four_bettor_pos": four_bettor_pos,
@@ -788,7 +813,7 @@ def reconcile_preflop_with_hand(
             "final_contribution_street_bb_by_pos": dict(current_street_commitments),
             "hero_context_preview": {
                 "hero_pos": hero_position,
-                "node_type": node_type_preview,
+                "node_type": projection_node_type,
                 "opener_pos": opener_pos,
                 "three_bettor_pos": three_bettor_pos,
                 "four_bettor_pos": four_bettor_pos,
@@ -801,6 +826,15 @@ def reconcile_preflop_with_hand(
             "same_hand_identity": same_hand,
             "contract_version": "preflop_resolved_v1",
         }
+
+    history_rebuilt = _actions_changed_from_frame_local(resolved_actions, frame_local_actions)
+    if same_hand and not fallback_to_frame_local and history_rebuilt:
+        if not reconciliation_applied:
+            reconciliation_applied = True
+        if "no_new_commitment_growth_detected" in reconciliation_notes:
+            reconciliation_notes = [note for note in reconciliation_notes if note != "no_new_commitment_growth_detected"]
+        if not any(note.startswith("history_rebuilt_from_previous_resolved_ledger") for note in reconciliation_notes):
+            reconciliation_notes.append("history_rebuilt_from_previous_resolved_ledger")
 
     confidence = _reconciliation_confidence(
         applied=reconciliation_applied and not fallback_to_frame_local,
@@ -843,6 +877,10 @@ def reconcile_preflop_with_hand(
             "last_frame_id": getattr(analysis, "frame_id", None),
             "reconstruction_confidence": confidence,
             "reconciliation_notes": list(reconciliation_notes),
+            "projection_node_type": projection_node_type,
+            "advisor_node_type": advisor_node_type,
+            "advisor_four_bettor_pos": advisor_four_bettor_pos,
+            "advisor_mapping_reason": advisor_mapping_reason,
             "last_aggressor_position": last_aggressor_position,
             "current_price_to_call": round(current_price_to_call, 4),
             "action_history": _clone_action_list(resolved_actions),
@@ -854,10 +892,14 @@ def reconcile_preflop_with_hand(
 
     hero_context_preview = dict(resolved_ledger.get("hero_context_preview") or {})
     hero_context_preview.setdefault("hero_pos", hero_position)
-    hero_context_preview["node_type"] = node_type_preview
+    hero_context_preview["node_type"] = projection_node_type
     hero_context_preview["opener_pos"] = opener_pos
     hero_context_preview["three_bettor_pos"] = three_bettor_pos
     hero_context_preview["four_bettor_pos"] = four_bettor_pos
+    hero_context_preview["advisor_node_type"] = advisor_node_type
+    hero_context_preview["advisor_four_bettor_pos"] = advisor_four_bettor_pos
+    if advisor_mapping_reason:
+        hero_context_preview["advisor_mapping_reason"] = advisor_mapping_reason
     hero_context_preview["limpers"] = len(limpers)
     hero_context_preview["callers"] = callers_after_open
     hero_context_preview["resolved"] = True
@@ -876,7 +918,9 @@ def reconcile_preflop_with_hand(
     result.update(
         {
             "street": "preflop",
-            "node_type_preview": node_type_preview,
+            "node_type_preview": projection_node_type,
+            "projection_node_type": projection_node_type,
+            "advisor_node_type": advisor_node_type,
             "hero_position": hero_position,
             "limpers": list(limpers),
             "limpers_count": len(limpers),
@@ -886,6 +930,8 @@ def reconcile_preflop_with_hand(
             "callers_after_open": callers_after_open,
             "callers": callers_after_open,
             "hero_context_preview": dict(hero_context_preview),
+            "advisor_four_bettor_pos": advisor_four_bettor_pos,
+            "advisor_mapping_reason": advisor_mapping_reason,
             "reconstructed_preflop": dict(resolved_ledger),
             "actions_this_frame": list(actions_this_frame),
             "action_history": _clone_action_list(resolved_actions),

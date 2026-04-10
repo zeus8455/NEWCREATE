@@ -187,8 +187,23 @@ def _derive_node_type_preview(
     if not hero_pos:
         return None
 
+    aggressive_actions = {"open_raise", "iso_raise", "3bet", "4bet", "5bet_jam", "raise"}
+    last_aggressive = None
+    max_raise_level = 0
+    for step in action_history:
+        semantic = str(step.get("semantic_action") or "")
+        if semantic in aggressive_actions:
+            last_aggressive = str(step.get("position") or step.get("pos") or "") or last_aggressive
+        max_raise_level = max(max_raise_level, int(step.get("raise_level_after_action") or 0))
+
     if player_count == 2 and limpers and limpers[0] == "BTN" and hero_pos == "BB" and not opener_pos:
         return "bb_vs_sb_limp"
+
+    if max_raise_level >= 4 and four_bettor_pos:
+        if hero_pos == four_bettor_pos and last_aggressive and last_aggressive != hero_pos:
+            return "fourbettor_vs_5bet"
+        if hero_pos == three_bettor_pos and last_aggressive and last_aggressive != hero_pos:
+            return "threebettor_vs_4bet"
 
     if four_bettor_pos:
         if hero_pos == three_bettor_pos:

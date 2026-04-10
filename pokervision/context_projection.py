@@ -75,15 +75,24 @@ class ContextProjector:
         )
         fallback_spot = None
 
-        node_type = str(
-            resolved_preflop.get("node_type")
+        projection_node_type = str(
+            resolved_preflop.get("projection_node_type")
+            or resolved_preflop.get("node_type")
             or hero_preview.get("node_type")
+            or action_state.get("projection_node_type")
             or action_state.get("node_type_preview")
             or ""
         ).strip()
-        if not node_type:
+        advisor_node_type = str(
+            resolved_preflop.get("advisor_node_type")
+            or hero_preview.get("advisor_node_type")
+            or projection_node_type
+            or ""
+        ).strip()
+        if not advisor_node_type:
             fallback_spot = self.bridge._build_hero_preflop_spot(hand)
-            node_type = fallback_spot.node_type
+            projection_node_type = projection_node_type or fallback_spot.node_type
+            advisor_node_type = fallback_spot.node_type
 
         opener_pos = resolved_preflop.get("opener_pos")
         if opener_pos is None:
@@ -97,9 +106,15 @@ class ContextProjector:
         if three_bettor_pos is None:
             three_bettor_pos = action_state.get("three_bettor_pos")
 
-        four_bettor_pos = resolved_preflop.get("four_bettor_pos")
+        four_bettor_pos = resolved_preflop.get("advisor_four_bettor_pos")
+        if four_bettor_pos is None:
+            four_bettor_pos = hero_preview.get("advisor_four_bettor_pos")
+        if four_bettor_pos is None:
+            four_bettor_pos = resolved_preflop.get("four_bettor_pos")
         if four_bettor_pos is None:
             four_bettor_pos = hero_preview.get("four_bettor_pos")
+        if four_bettor_pos is None:
+            four_bettor_pos = action_state.get("advisor_four_bettor_pos")
         if four_bettor_pos is None:
             four_bettor_pos = action_state.get("four_bettor_pos")
 
@@ -125,6 +140,7 @@ class ContextProjector:
             and four_bettor_pos is None
             and limpers is None
             and callers is None
+            and not advisor_node_type
         ):
             fallback_spot = self.bridge._build_hero_preflop_spot(hand)
 
@@ -151,7 +167,7 @@ class ContextProjector:
         return PreflopContext(
             hero_hand=list(hero_cards),
             hero_pos=hero_pos,
-            node_type=node_type or "unopened",
+            node_type=advisor_node_type or projection_node_type or "unopened",
             opener_pos=opener_pos,
             three_bettor_pos=three_bettor_pos,
             four_bettor_pos=four_bettor_pos,
@@ -164,6 +180,9 @@ class ContextProjector:
                 "hand_id": hand.hand_id,
                 "hero_original_position": hand.hero_position,
                 "projection_source": projection_source,
+                "projection_node_type": projection_node_type or advisor_node_type or "unopened",
+                "advisor_node_type": advisor_node_type or projection_node_type or "unopened",
+                "advisor_mapping_reason": resolved_preflop.get("advisor_mapping_reason") or hero_preview.get("advisor_mapping_reason"),
                 "actions_seen": action_history,
             },
         )
