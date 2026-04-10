@@ -358,6 +358,7 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         safe_float=_safe_float,
         derive_node_type_preview=_derive_node_type_preview,
         build_preflop_resolved_ledger=_build_preflop_resolved_ledger,
+        build_action_step=_build_action_step,
     )
 
 def _normalized_hero_cards_for_identity(cards: Any) -> tuple[str, ...]:
