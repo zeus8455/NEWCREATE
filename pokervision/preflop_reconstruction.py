@@ -1038,8 +1038,18 @@ def reconcile_preflop_with_hand(
         }
     )
     hero_context_preview = dict(projection_payload.get("hero_context_preview") or {})
-    resolved_ledger["hero_context_preview"] = hero_context_preview
-    resolved_ledger["preflop_projection"] = dict(projection_payload)
+    resolved_ledger.update(
+        {
+            "node_type": projection_payload.get("projection_node_type"),
+            "node_type_preview": projection_payload.get("projection_node_type"),
+            "projection_node_type": projection_payload.get("projection_node_type"),
+            "advisor_node_type": projection_payload.get("advisor_node_type"),
+            "advisor_four_bettor_pos": projection_payload.get("advisor_four_bettor_pos"),
+            "advisor_mapping_reason": projection_payload.get("advisor_mapping_reason"),
+            "hero_context_preview": hero_context_preview,
+            "preflop_projection": dict(projection_payload),
+        }
+    )
 
     last_actions_by_position: Dict[str, str] = {}
     for action in resolved_actions:
