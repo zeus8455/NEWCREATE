@@ -17,6 +17,7 @@ PlayerIsFolded = Callable[[Dict[str, Dict[str, object]], str], bool]
 
 FRAME_OBSERVATION_CONTRACT_VERSION = "preflop_frame_observation_v2"
 HAND_RECONCILIATION_CONTRACT_VERSION = "preflop_hand_reconciliation_v2"
+PREFLOP_PROJECTION_CONTRACT_VERSION = "preflop_projection_v1"
 FRAME_ONLY_RECONCILIATION_MODE = "frame_local_only"
 COMMITMENT_GROWTH_RECONCILIATION_MODE = "commitment_growth_reconciled"
 
@@ -47,6 +48,17 @@ def _dedupe_preserve_order(values: Iterable[Any]) -> List[str]:
         seen.add(value)
         out.append(value)
     return out
+
+
+def _normalize_count(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _action_position(action: Dict[str, Any]) -> str:
@@ -618,24 +630,83 @@ def reconstruct_preflop_from_frame(
 
 
 def build_preflop_projection(resolved_state: Dict[str, Any]) -> Dict[str, Any]:
-    """Build projection metadata from the reconciled preflop ledger."""
-    projection = _build_projection_mapping(
-        node_type_preview=resolved_state.get("node_type") or resolved_state.get("node_type_preview"),
-        opener_pos=resolved_state.get("opener_pos"),
-        three_bettor_pos=resolved_state.get("three_bettor_pos"),
-        four_bettor_pos=resolved_state.get("four_bettor_pos"),
-        last_aggressor_position=resolved_state.get("last_aggressor_position"),
+    """Build the canonical preflop projection payload from resolved state.
+
+    This layer is the official step-3.6 contract. Downstream consumers should
+    read this object instead of rebuilding preview fields from frame-local or
+    ad-hoc state.
+    """
+    resolved = dict(resolved_state or {})
+    resolved_actions = _normalize_action_orders(
+        _clone_action_list(resolved.get("action_history_resolved") or resolved.get("action_history") or [])
     )
-    hero_context_preview = dict(resolved_state.get("hero_context_preview") or {})
+    projection = _build_projection_mapping(
+        node_type_preview=resolved.get("projection_node_type") or resolved.get("node_type") or resolved.get("node_type_preview"),
+        opener_pos=resolved.get("opener_pos"),
+        three_bettor_pos=resolved.get("three_bettor_pos"),
+        four_bettor_pos=resolved.get("four_bettor_pos"),
+        last_aggressor_position=resolved.get("last_aggressor_position"),
+    )
+    limpers_count = _normalize_count(
+        resolved.get("limpers_count")
+        if resolved.get("limpers_count") is not None
+        else resolved.get("limpers")
+    )
+    callers_count = _normalize_count(
+        resolved.get("callers")
+        if resolved.get("callers") is not None
+        else resolved.get("callers_after_open")
+    )
+    hero_context_preview = dict(resolved.get("hero_context_preview") or {})
     hero_context_preview.update(
         {
+            "hero_pos": resolved.get("hero_position"),
+            "node_type": projection.get("projection_node_type"),
+            "projection_node_type": projection.get("projection_node_type"),
             "advisor_node_type": projection.get("advisor_node_type"),
             "advisor_four_bettor_pos": projection.get("advisor_four_bettor_pos"),
             "advisor_mapping_reason": projection.get("advisor_mapping_reason"),
+            "opener_pos": resolved.get("opener_pos"),
+            "three_bettor_pos": resolved.get("three_bettor_pos"),
+            "four_bettor_pos": resolved.get("four_bettor_pos"),
+            "limpers": limpers_count,
+            "callers": callers_count,
+            "resolved": True,
+            "projection_source": "preflop_projection",
+            "projection_contract_version": PREFLOP_PROJECTION_CONTRACT_VERSION,
+            "reconciliation_mode": resolved.get("reconciliation_mode"),
+            "reconciliation_applied": bool(resolved.get("reconciliation_applied", False)),
+            "reconstruction_confidence": resolved.get("reconstruction_confidence"),
+            "frame_local_only": str(resolved.get("reconciliation_mode") or "") == FRAME_ONLY_RECONCILIATION_MODE,
         }
     )
     return {
-        **projection,
+        "contract_version": PREFLOP_PROJECTION_CONTRACT_VERSION,
+        "projection_source": "resolved_preflop_ledger",
+        "projection_node_type": projection.get("projection_node_type"),
+        "advisor_node_type": projection.get("advisor_node_type"),
+        "advisor_four_bettor_pos": projection.get("advisor_four_bettor_pos"),
+        "advisor_mapping_reason": projection.get("advisor_mapping_reason"),
+        "node_type": projection.get("projection_node_type"),
+        "hero_position": resolved.get("hero_position"),
+        "opener_pos": resolved.get("opener_pos"),
+        "three_bettor_pos": resolved.get("three_bettor_pos"),
+        "four_bettor_pos": resolved.get("four_bettor_pos"),
+        "limpers": limpers_count,
+        "callers": callers_count,
+        "action_history": list(resolved_actions),
+        "action_history_resolved": list(resolved_actions),
+        "final_contribution_bb_by_pos": _round_map(
+            resolved.get("resolved_commitments_by_pos") or resolved.get("final_contribution_bb_by_pos") or {}
+        ),
+        "final_contribution_street_bb_by_pos": _round_map(
+            resolved.get("final_contribution_street_bb_by_pos") or {}
+        ),
+        "positions_closed_to_action": _clone_string_list(resolved.get("positions_closed_to_action") or []),
+        "reconciliation_mode": resolved.get("reconciliation_mode"),
+        "reconciliation_applied": bool(resolved.get("reconciliation_applied", False)),
+        "reconciliation_notes": _clone_string_list(resolved.get("reconciliation_notes") or []),
+        "reconstruction_confidence": resolved.get("reconstruction_confidence"),
         "hero_context_preview": hero_context_preview,
     }
 
@@ -895,6 +966,8 @@ def reconcile_preflop_with_hand(
 
     reconstruction_confidence = 1.0 if not unresolved_positions else 0.8
 
+    projection_payload: Dict[str, Any]
+
     if build_preflop_resolved_ledger is not None:
         resolved_ledger = build_preflop_resolved_ledger(
             hero_position=hero_position,
@@ -937,33 +1010,11 @@ def reconcile_preflop_with_hand(
             "same_hand_identity": same_hand,
         }
 
-    hero_context_preview = dict(resolved_ledger.get("hero_context_preview") or {})
-    hero_context_preview.update(
-        {
-            "hero_pos": hero_position,
-            "node_type": projection_meta["projection_node_type"],
-            "opener_pos": opener_pos,
-            "three_bettor_pos": three_bettor_pos,
-            "four_bettor_pos": four_bettor_pos,
-            "limpers": len(limpers),
-            "callers": callers_after_open,
-            "resolved": True,
-            "projection_source": "reconstructed_preflop",
-            "advisor_node_type": projection_meta["advisor_node_type"],
-            "advisor_four_bettor_pos": projection_meta["advisor_four_bettor_pos"],
-            "advisor_mapping_reason": projection_meta["advisor_mapping_reason"],
-            "resolution_scope": "hand_reconciled" if same_hand and previous_actions else "frame_local_only",
-            "frame_local_only": not (same_hand and previous_actions),
-            "reconciliation_confidence": reconstruction_confidence,
-        }
-    )
-
     resolved_ledger.update(
         {
             "action_history": list(resolved_actions),
             "action_history_resolved": list(resolved_actions),
             "node_type": projection_meta["projection_node_type"],
-            "hero_context_preview": hero_context_preview,
             "resolved_commitments_by_pos": _round_map(current_commitments),
             "last_frame_id": frame_id,
             "reconstruction_confidence": reconstruction_confidence,
@@ -978,6 +1029,17 @@ def reconcile_preflop_with_hand(
             "advisor_mapping_reason": projection_meta["advisor_mapping_reason"],
         }
     )
+
+    projection_payload = build_preflop_projection(
+        {
+            **resolved_ledger,
+            "hero_position": hero_position,
+            "positions_closed_to_action": list(positions_closed_to_action),
+        }
+    )
+    hero_context_preview = dict(projection_payload.get("hero_context_preview") or {})
+    resolved_ledger["hero_context_preview"] = hero_context_preview
+    resolved_ledger["preflop_projection"] = dict(projection_payload)
 
     last_actions_by_position: Dict[str, str] = {}
     for action in resolved_actions:
@@ -1018,13 +1080,14 @@ def reconcile_preflop_with_hand(
         "four_bettor_pos": four_bettor_pos,
         "callers_after_open": callers_after_open,
         "callers": callers_after_open,
-        "node_type_preview": projection_meta["projection_node_type"],
-        "projection_node_type": projection_meta["projection_node_type"],
-        "advisor_node_type": projection_meta["advisor_node_type"],
-        "advisor_four_bettor_pos": projection_meta["advisor_four_bettor_pos"],
-        "advisor_mapping_reason": projection_meta["advisor_mapping_reason"],
+        "node_type_preview": projection_payload["projection_node_type"],
+        "projection_node_type": projection_payload["projection_node_type"],
+        "advisor_node_type": projection_payload["advisor_node_type"],
+        "advisor_four_bettor_pos": projection_payload["advisor_four_bettor_pos"],
+        "advisor_mapping_reason": projection_payload["advisor_mapping_reason"],
         "hero_position": hero_position,
         "hero_context_preview": hero_context_preview,
+        "preflop_projection": dict(projection_payload),
         "reconstructed_preflop": resolved_ledger,
         "skipped_positions": _dedupe_preserve_order(skipped_positions),
         "unresolved_positions": _dedupe_preserve_order(unresolved_positions),

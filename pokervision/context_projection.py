@@ -15,6 +15,8 @@ source instead of several ad-hoc builders.
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Sequence
 
+from .preflop_reconstruction import build_preflop_projection
+
 POSTFLOP_STREETS = ("flop", "turn", "river")
 
 
@@ -56,114 +58,86 @@ class ContextProjector:
             return self.build_preflop_context(analysis, hand)
         return self.build_postflop_context(analysis, hand, resolved_street)
 
+    def _resolve_preflop_projection(self, hand, action_state: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        resolved_preflop = dict(
+            getattr(hand, "reconstructed_preflop", None)
+            or action_state.get("reconstructed_preflop")
+            or {}
+        )
+        candidate_projection = (
+            getattr(hand, "preflop_projection", None)
+            or resolved_preflop.get("preflop_projection")
+            or action_state.get("preflop_projection")
+            or {}
+        )
+        projection = dict(candidate_projection or {})
+        if not projection or not (
+            projection.get("projection_node_type")
+            or projection.get("advisor_node_type")
+            or projection.get("action_history_resolved")
+            or projection.get("action_history")
+        ):
+            source_state = dict(resolved_preflop or action_state or {})
+            source_state.setdefault("hero_position", getattr(hand, "hero_position", None))
+            projection = build_preflop_projection(source_state)
+        return projection, resolved_preflop
+
+
     def build_preflop_context(self, analysis, hand):
         _, _, PreflopContext = self.resolve_decision_types()
         hero_cards = list(getattr(hand, "hero_cards", None) or getattr(analysis, "hero_cards", None) or [])
         if hand is None or len(hero_cards) != 2:
             return None
 
-        action_state = getattr(hand, "action_state", {}) or {}
-        resolved_preflop = dict(
-            getattr(hand, "reconstructed_preflop", None)
-            or action_state.get("reconstructed_preflop")
-            or {}
-        )
-        hero_preview = dict(
-            resolved_preflop.get("hero_context_preview")
-            or action_state.get("hero_context_preview")
-            or {}
-        )
-        fallback_spot = None
+        action_state = dict(getattr(hand, "action_state", {}) or {})
+        projection, resolved_preflop = self._resolve_preflop_projection(hand, action_state)
+        hero_preview = dict(projection.get("hero_context_preview") or {})
 
         projection_node_type = str(
-            resolved_preflop.get("projection_node_type")
+            projection.get("projection_node_type")
+            or projection.get("node_type")
+            or resolved_preflop.get("projection_node_type")
             or resolved_preflop.get("node_type")
-            or hero_preview.get("node_type")
-            or action_state.get("projection_node_type")
-            or action_state.get("node_type_preview")
             or ""
         ).strip()
         advisor_node_type = str(
-            resolved_preflop.get("advisor_node_type")
-            or hero_preview.get("advisor_node_type")
+            projection.get("advisor_node_type")
             or projection_node_type
             or ""
         ).strip()
-        if not advisor_node_type:
+
+        opener_pos = projection.get("opener_pos")
+        three_bettor_pos = projection.get("three_bettor_pos")
+        four_bettor_pos = projection.get("advisor_four_bettor_pos") or projection.get("four_bettor_pos")
+        limpers = projection.get("limpers")
+        callers = projection.get("callers")
+        action_history = list(
+            projection.get("action_history_resolved")
+            or projection.get("action_history")
+            or resolved_preflop.get("action_history_resolved")
+            or resolved_preflop.get("action_history")
+            or []
+        )
+
+        projection_source = str(
+            projection.get("projection_source")
+            or ("preflop_projection" if projection else "reconstructed_preflop_resolved")
+        )
+
+        fallback_spot = None
+        if not advisor_node_type and not projection_node_type:
             fallback_spot = self.bridge._build_hero_preflop_spot(hand)
             projection_node_type = projection_node_type or fallback_spot.node_type
             advisor_node_type = fallback_spot.node_type
-
-        opener_pos = resolved_preflop.get("opener_pos")
-        if opener_pos is None:
-            opener_pos = hero_preview.get("opener_pos")
-        if opener_pos is None:
-            opener_pos = action_state.get("opener_pos")
-
-        three_bettor_pos = resolved_preflop.get("three_bettor_pos")
-        if three_bettor_pos is None:
-            three_bettor_pos = hero_preview.get("three_bettor_pos")
-        if three_bettor_pos is None:
-            three_bettor_pos = action_state.get("three_bettor_pos")
-
-        four_bettor_pos = resolved_preflop.get("advisor_four_bettor_pos")
-        if four_bettor_pos is None:
-            four_bettor_pos = hero_preview.get("advisor_four_bettor_pos")
-        if four_bettor_pos is None:
-            four_bettor_pos = resolved_preflop.get("four_bettor_pos")
-        if four_bettor_pos is None:
-            four_bettor_pos = hero_preview.get("four_bettor_pos")
-        if four_bettor_pos is None:
-            four_bettor_pos = action_state.get("advisor_four_bettor_pos")
-        if four_bettor_pos is None:
-            four_bettor_pos = action_state.get("four_bettor_pos")
-
-        limpers = resolved_preflop.get("limpers_count")
-        if limpers is None:
-            limpers = resolved_preflop.get("limpers")
-        if limpers is None:
-            limpers = hero_preview.get("limpers")
-        if limpers is None:
-            limpers = action_state.get("limpers")
-
-        callers = resolved_preflop.get("callers")
-        if callers is None:
-            callers = resolved_preflop.get("callers_after_open")
-        if callers is None:
-            callers = hero_preview.get("callers")
-        if callers is None:
-            callers = action_state.get("callers_after_open")
-
-        if fallback_spot is None and (
-            opener_pos is None
-            and three_bettor_pos is None
-            and four_bettor_pos is None
-            and limpers is None
-            and callers is None
-            and not advisor_node_type
-        ):
-            fallback_spot = self.bridge._build_hero_preflop_spot(hand)
-
-        if fallback_spot is not None:
             opener_pos = fallback_spot.opener_pos if opener_pos is None else opener_pos
             three_bettor_pos = fallback_spot.three_bettor_pos if three_bettor_pos is None else three_bettor_pos
             four_bettor_pos = fallback_spot.four_bettor_pos if four_bettor_pos is None else four_bettor_pos
             limpers = fallback_spot.limpers if limpers is None else limpers
             callers = fallback_spot.callers if callers is None else callers
+            action_history = action_history or self.bridge._street_actions(hand, "preflop")
+            projection_source = "replayed_actions_fallback"
 
-        action_history = list(
-            resolved_preflop.get("action_history_resolved")
-            or resolved_preflop.get("action_history")
-            or action_state.get("action_history_resolved")
-            or action_state.get("action_history")
-            or self.bridge._street_actions(hand, "preflop")
-        )
         hero_pos = self.bridge._preflop_pos(hand.hero_position, int(hand.player_count))
-        projection_source = (
-            "reconstructed_preflop_resolved"
-            if resolved_preflop
-            else ("action_state_preview" if hero_preview else "replayed_actions_fallback")
-        )
         return PreflopContext(
             hero_hand=list(hero_cards),
             hero_pos=hero_pos,
@@ -180,9 +154,10 @@ class ContextProjector:
                 "hand_id": hand.hand_id,
                 "hero_original_position": hand.hero_position,
                 "projection_source": projection_source,
+                "projection_contract_version": projection.get("contract_version"),
                 "projection_node_type": projection_node_type or advisor_node_type or "unopened",
                 "advisor_node_type": advisor_node_type or projection_node_type or "unopened",
-                "advisor_mapping_reason": resolved_preflop.get("advisor_mapping_reason") or hero_preview.get("advisor_mapping_reason"),
+                "advisor_mapping_reason": projection.get("advisor_mapping_reason"),
                 "actions_seen": action_history,
             },
         )
