@@ -23,6 +23,17 @@ CanonicalContextType = Callable[[Any], str]
 Serializer = Callable[[Any], Any]
 
 
+def _count_field(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass(slots=True)
 class ContextProjector:
     """Build canonical decision-layer contexts from a PokerVision hand."""
@@ -52,19 +63,61 @@ class ContextProjector:
             return None
 
         action_state = getattr(hand, "action_state", {}) or {}
-        hero_preview = dict(action_state.get("hero_context_preview") or {})
+        resolved_preflop = dict(
+            getattr(hand, "reconstructed_preflop", None)
+            or action_state.get("reconstructed_preflop")
+            or {}
+        )
+        hero_preview = dict(
+            resolved_preflop.get("hero_context_preview")
+            or action_state.get("hero_context_preview")
+            or {}
+        )
         fallback_spot = None
 
-        node_type = str(hero_preview.get("node_type") or action_state.get("node_type_preview") or "").strip()
+        node_type = str(
+            resolved_preflop.get("node_type")
+            or hero_preview.get("node_type")
+            or action_state.get("node_type_preview")
+            or ""
+        ).strip()
         if not node_type:
             fallback_spot = self.bridge._build_hero_preflop_spot(hand)
             node_type = fallback_spot.node_type
 
-        opener_pos = hero_preview.get("opener_pos")
-        three_bettor_pos = hero_preview.get("three_bettor_pos")
-        four_bettor_pos = hero_preview.get("four_bettor_pos")
-        limpers = hero_preview.get("limpers")
-        callers = hero_preview.get("callers")
+        opener_pos = resolved_preflop.get("opener_pos")
+        if opener_pos is None:
+            opener_pos = hero_preview.get("opener_pos")
+        if opener_pos is None:
+            opener_pos = action_state.get("opener_pos")
+
+        three_bettor_pos = resolved_preflop.get("three_bettor_pos")
+        if three_bettor_pos is None:
+            three_bettor_pos = hero_preview.get("three_bettor_pos")
+        if three_bettor_pos is None:
+            three_bettor_pos = action_state.get("three_bettor_pos")
+
+        four_bettor_pos = resolved_preflop.get("four_bettor_pos")
+        if four_bettor_pos is None:
+            four_bettor_pos = hero_preview.get("four_bettor_pos")
+        if four_bettor_pos is None:
+            four_bettor_pos = action_state.get("four_bettor_pos")
+
+        limpers = resolved_preflop.get("limpers_count")
+        if limpers is None:
+            limpers = resolved_preflop.get("limpers")
+        if limpers is None:
+            limpers = hero_preview.get("limpers")
+        if limpers is None:
+            limpers = action_state.get("limpers")
+
+        callers = resolved_preflop.get("callers")
+        if callers is None:
+            callers = resolved_preflop.get("callers_after_open")
+        if callers is None:
+            callers = hero_preview.get("callers")
+        if callers is None:
+            callers = action_state.get("callers_after_open")
 
         if fallback_spot is None and (
             opener_pos is None
@@ -82,8 +135,19 @@ class ContextProjector:
             limpers = fallback_spot.limpers if limpers is None else limpers
             callers = fallback_spot.callers if callers is None else callers
 
-        action_history = list(action_state.get("action_history") or self.bridge._street_actions(hand, "preflop"))
+        action_history = list(
+            resolved_preflop.get("action_history_resolved")
+            or resolved_preflop.get("action_history")
+            or action_state.get("action_history_resolved")
+            or action_state.get("action_history")
+            or self.bridge._street_actions(hand, "preflop")
+        )
         hero_pos = self.bridge._preflop_pos(hand.hero_position, int(hand.player_count))
+        projection_source = (
+            "reconstructed_preflop_resolved"
+            if resolved_preflop
+            else ("action_state_preview" if hero_preview else "replayed_actions_fallback")
+        )
         return PreflopContext(
             hero_hand=list(hero_cards),
             hero_pos=hero_pos,
@@ -91,16 +155,16 @@ class ContextProjector:
             opener_pos=opener_pos,
             three_bettor_pos=three_bettor_pos,
             four_bettor_pos=four_bettor_pos,
-            limpers=int(limpers or 0),
-            callers=int(callers or 0),
+            limpers=_count_field(limpers),
+            callers=_count_field(callers),
             range_owner="hero",
             action_history=action_history,
             meta={
                 "source": "pokervision",
                 "hand_id": hand.hand_id,
                 "hero_original_position": hand.hero_position,
-                "projection_source": "action_state_preview" if hero_preview else "replayed_actions_fallback",
-                "actions_seen": self.bridge._street_actions(hand, "preflop"),
+                "projection_source": projection_source,
+                "actions_seen": action_history,
             },
         )
 

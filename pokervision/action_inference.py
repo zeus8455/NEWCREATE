@@ -246,6 +246,82 @@ def _build_action_step(
     return _decorate_legacy_action_fields(payload)
 
 
+
+
+def _normalize_count_or_len(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _build_preflop_resolved_ledger(
+    *,
+    hero_position: Optional[str],
+    actor_order: List[str],
+    action_history: List[Dict[str, Any]],
+    final_contribution_bb_by_pos: Dict[str, float],
+    final_contribution_street_bb_by_pos: Dict[str, float],
+    current_price_to_call: float,
+    opener_pos: Optional[str],
+    three_bettor_pos: Optional[str],
+    four_bettor_pos: Optional[str],
+    limpers: List[str],
+    callers_after_open: int,
+    node_type_preview: Optional[str],
+    source_mode: str,
+    skipped_positions: List[str],
+    same_hand_identity: bool,
+) -> Dict[str, Any]:
+    resolved_history = [_decorate_legacy_action_fields(dict(item)) for item in list(action_history or [])]
+    limper_positions = [str(pos) for pos in list(limpers or [])]
+    callers_count = _normalize_count_or_len(callers_after_open)
+    hero_context_preview = {
+        "hero_pos": hero_position,
+        "node_type": node_type_preview,
+        "opener_pos": opener_pos,
+        "three_bettor_pos": three_bettor_pos,
+        "four_bettor_pos": four_bettor_pos,
+        "limpers": len(limper_positions),
+        "callers": callers_count,
+        "resolved": True,
+        "projection_source": "reconstructed_preflop",
+    }
+    return {
+        "street": "preflop",
+        "source_mode": source_mode,
+        "hero_position": hero_position,
+        "node_type": node_type_preview,
+        "opener_pos": opener_pos,
+        "three_bettor_pos": three_bettor_pos,
+        "four_bettor_pos": four_bettor_pos,
+        "limpers": limper_positions,
+        "limpers_count": len(limper_positions),
+        "callers": callers_count,
+        "callers_after_open": callers_count,
+        "action_history": list(resolved_history),
+        "action_history_resolved": list(resolved_history),
+        "actor_order": [str(pos) for pos in list(actor_order or [])],
+        "current_price_to_call": round(_safe_float(current_price_to_call, 0.0), 4),
+        "last_aggressor_position": four_bettor_pos or three_bettor_pos or opener_pos,
+        "final_contribution_bb_by_pos": {
+            str(pos): round(_safe_float(value, 0.0), 4)
+            for pos, value in (final_contribution_bb_by_pos or {}).items()
+        },
+        "final_contribution_street_bb_by_pos": {
+            str(pos): round(_safe_float(value, 0.0), 4)
+            for pos, value in (final_contribution_street_bb_by_pos or {}).items()
+        },
+        "hero_context_preview": hero_context_preview,
+        "skipped_positions": [str(pos) for pos in list(skipped_positions or [])],
+        "same_hand_identity": bool(same_hand_identity),
+        "contract_version": "preflop_resolved_v1",
+    }
+
 def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> Dict[str, Any]:
     amount_state = getattr(analysis, "amount_state", None) or getattr(analysis, "amount_normalization", None) or {}
     contributions = {
@@ -444,6 +520,25 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         action_history=action_history,
     )
 
+    resolved_history = [_decorate_legacy_action_fields(item) for item in [*action_history, *terminal_actions]]
+    resolved_ledger = _build_preflop_resolved_ledger(
+        hero_position=hero_position,
+        actor_order=actor_order,
+        action_history=resolved_history,
+        final_contribution_bb_by_pos=contributions,
+        final_contribution_street_bb_by_pos=street_contribs,
+        current_price_to_call=current_price_to_call,
+        opener_pos=opener_pos,
+        three_bettor_pos=three_bettor_pos,
+        four_bettor_pos=four_bettor_pos,
+        limpers=limpers,
+        callers_after_open=callers_after_open,
+        node_type_preview=node_type_preview,
+        source_mode=amount_state.get("source_mode", "forced_blinds_plus_visible_chips"),
+        skipped_positions=skipped_positions,
+        same_hand_identity=_same_hand_identity(previous_hand, analysis),
+    )
+
     return {
         "street": "preflop",
         "source_mode": amount_state.get("source_mode", "forced_blinds_plus_visible_chips"),
@@ -453,8 +548,9 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         "last_aggressor_position": four_bettor_pos or three_bettor_pos or opener_pos,
         "acted_positions": list(acted_positions),
         "last_actions_by_position": dict(last_actions_by_position),
-        "actions_this_frame": [_decorate_legacy_action_fields(item) for item in [*action_history, *terminal_actions]],
-        "action_history": [_decorate_legacy_action_fields(item) for item in [*action_history, *terminal_actions]],
+        "actions_this_frame": list(resolved_history),
+        "action_history": list(resolved_history),
+        "action_history_resolved": list(resolved_history),
         "historical_terminal_actions": [_decorate_legacy_action_fields(item) for item in terminal_actions],
         "final_contribution_bb_by_pos": {
             pos: round(value, 4) for pos, value in contributions.items()
@@ -462,8 +558,8 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         "final_contribution_street_bb_by_pos": {
             pos: round(value, 4) for pos, value in street_contribs.items()
         },
-        "semantic_action": ([*action_history, *terminal_actions][-1]["semantic_action"] if [*action_history, *terminal_actions] else None),
-        "engine_action": ([*action_history, *terminal_actions][-1].get("engine_action") if [*action_history, *terminal_actions] else None),
+        "semantic_action": (resolved_history[-1]["semantic_action"] if resolved_history else None),
+        "engine_action": (resolved_history[-1].get("engine_action") if resolved_history else None),
         "raise_level_after_action": (action_history[-1]["raise_level_after_action"] if action_history else 0),
         "current_price_to_call_after_action": (action_history[-1]["current_price_to_call_after_action"] if action_history else round(current_price_to_call, 4)),
         "limpers": list(limpers),
@@ -475,16 +571,10 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         "callers": callers_after_open,
         "node_type_preview": node_type_preview,
         "hero_position": hero_position,
-        "hero_context_preview": {
-            "hero_pos": hero_position,
-            "node_type": node_type_preview,
-            "opener_pos": opener_pos,
-            "three_bettor_pos": three_bettor_pos,
-            "four_bettor_pos": four_bettor_pos,
-            "limpers": len(limpers),
-            "callers": callers_after_open,
-        },
+        "hero_context_preview": dict(resolved_ledger.get("hero_context_preview") or {}),
+        "reconstructed_preflop": dict(resolved_ledger),
         "skipped_positions": skipped_positions,
+        "same_hand_identity": bool(resolved_ledger.get("same_hand_identity", False)),
     }
 
 

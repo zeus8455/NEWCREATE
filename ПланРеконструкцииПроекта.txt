@@ -41,3 +41,173 @@ CO open -> BTN 3bet -> SB cold_4bet;
 
 
 
+
+План внедрения шага 3
+3.1. Зафиксировать новый контракт preflop-реконструкции
+
+Что сделать:
+Перед правками кода зафиксировать, что для preflop есть только один канонический результат:
+
+reconstructed_preflop
+action_history_resolved
+hero_context_preview
+node_type_preview
+opener_pos / three_bettor_pos / four_bettor_pos / limpers / callers
+
+Именно этот resolved-результат должны читать дальше context_projection, solver bridge, render state и hand persistence. Сейчас context_projection Читает action_state["action_history"] или fallback bridge-spot, а hand_state дополнительно сливает старую и новую историю. Это и надо прекратить для preflop.
+
+Файлы:
+
+pokervision/action_inference.py
+pokervision/hand_state.py
+pokervision/context_projection.py
+
+Критерий готовности:
+У preflop есть один явный “resolved ledger”, который не равен просто сумме старых кадров.
+
+3.2. Вынести preflop в отдельный внутренний модуль
+
+Что сделать:
+Не дописывать это дальше в середине action_inference.py, а выделить отдельный модуль, например:
+
+pokervision/preflop_reconstruction.py
+
+В нём сделать три уровня функций:
+
+build_preflop_frame_observation(...)
+reconstruct_preflop_from_frame(...)
+reconcile_preflop_with_hand(previous_hand, current_frame_result, ...)
+
+Сейчас весь preflop живёт монолитом внутри _infer_preflop_actions(), а postflop уже фактически использует логику “предыдущая рука + текущий street-state”. Для шага 3 нужно привести preflop к такой же дисциплине по слоям.
+
+Почему это обязательно:
+Иначе вы снова смешаете:
+
+raw observation,
+inference,
+persistence,
+projection для solver.
+3.3. Оставить текущий single-pass только как frame-local observation
+
+Что сделать:
+Текущий цикл по actor_order оставить, но изменить его роль.
+
+Сейчас он сразу пытается выдать финальную историю руки.
+Нужно, чтобы он выдавал только:
+
+actor_order
+final_contribution_bb_by_pos
+forced_blinds
+street_commitments_current_frame
+frame_local_actions
+skipped_positions
+unresolved_positions
+frame_local_max_aggression
+
+То есть это должен быть ответ на вопрос:
+“Какой минимально правдоподобный порядок действий следует только из текущего финального снимка?”
+
+Потому что в текущем коде, если после будущего 4-бета у ранней позиции уже стоит большой вклад, а у более позднего игрока в финальном снимке вклад меньше, эта поздняя позиция попадает в skipped_positions. Это логично для одного кадра, но недостаточно для истории руки.
+
+Критерий готовности:
+Frame-local слой имеет право вернуть “неполную” историю, но не имеет права притворяться полной.
+
+3.4. Добавить hand-level reconciler для той же руки
+
+Что сделать:
+Это ключевой подшаг.
+
+Нужен reconciler, который для той же hero_cards сравнивает:
+
+прошлый resolved preflop ledger,
+текущие final_contribution_bb_by_pos,
+текущий frame-local результат.
+
+и строит обновлённую согласованную лестницу агрессии.
+
+Пример логики:
+
+если ранее был UTG open 3.5,
+потом появился SB 42,
+потом UTG вырос до 70.5,
+то новый resolved ledger должен стать не
+UTG open 3.5 -> UTG open 26 -> UTG open 70.5,
+а
+UTG open 3.5 -> SB 3bet 42 -> UTG 4bet/5bet-type escalation.
+
+Здесь не надо “угадывать всё по поту”; надо делать reconciliation по росту вкладов внутри той же руки. У postflop уже есть идея same_hand и перенос состояния по улице; preflop нужен такой же hand-aware слой.
+
+Что именно хранить в reconciler state:
+
+resolved_actions
+resolved_commitments_by_pos
+last_aggressor
+raise_level
+openers / three_bettor / four_bettor
+positions_closed_to_action
+last_frame_id
+reconstruction_confidence
+reconciliation_notes
+3.5. Перестать merge-ить preflop history в hand_state.py
+
+Что сделать:
+Для preflop нельзя сохранять историю как:
+existing_history + incoming_history + novel_actions.
+
+Именно так сейчас и делается.
+
+Нужно заменить это поведение правилом:
+
+для Preflop — сохраняем resolved_preflop.action_history целиком как новую каноническую историю;
+для Postflop — можно сохранять приращения street-state, как сейчас.
+
+иначе:
+какой бы умный reconciler вы ни написали, hand_state.py потом снова испортит результат накопительным merge.
+
+Критерий готовности:
+Внутри одной руки больше не может быть три OPEN одного и того же игрока с разными размерами, если это на самом деле одна агрессивная линия. Это ваш главный regression-check на текущем кейсе.
+
+3.6. Пересобрать derivation node_type_preview только из resolved ledger
+
+Что сделать:
+node_type_preview, hero_context_preview, advisor_input, solver_input должны строиться только из reconciled preflop history, а не из frame-local history и не из merged-history.
+
+сейчас node_type_preview зависит от opener_pos / three_bettor_pos / four_bettor_pos / callers_after_open / limpers, которые формируются в текущем preflop pass, а context_projection потом берёт action_state["action_history"]. Значит при плохой истории solver тоже получает плохой spot.
+
+Критерий готовности:
+Для текущей вашей руки solver/input больше не должен видеть facing_open, если resolved ledger уже содержит 3bet/4bet-эскалацию. Сейчас он именно так и ошибается.
+
+3.7. Расширить тесты именно под runtime-эскалацию
+
+Что сделать:
+Сейчас тесты закрывают:
+
+limp -> iso -> call -> 3bet,
+SB limp -> BB check,
+CO open -> BTN 3bet -> SB cold 4bet.
+Но я не вижу теста на runtime-обновление одной и той же руки по кадрам и не вижу теста на 5bet_jam.
+
+Нужно добавить минимум 6 новых тестов:
+
+open -> 3bet -> 4bet через три кадра одной руки
+open -> call -> squeeze -> opener_fold через несколько кадров
+open -> 3bet -> 4bet -> 5bet_jam
+SB limp -> BB raise -> SB jam для HU/short-handed
+рост размера уже существующего агрессора не должен создавать новый open_raise
+hand_state должен хранить resolved preflop history, а не merged frame history
+
+Критерий готовности:
+Тесты должны падать на текущем коде и зеленеть только после reconciler + storage fix.
+
+3.8. Прогнать обязательный regression-кейс на вашей раздаче
+
+Что сделать:
+После внедрения шага 3 нужно использовать именно этот кейс hand_000041 как эталонный regression sample.
+
+Проверки после фикса:
+
+В action_history нет цепочки OPEN 3.5 / OPEN 26 / OPEN 70.5;
+у SB учитывается 42.0, у UTG — 70.5, пот 113.5;
+three_bettor_pos и/или four_bettor_pos уже не null, если линия это позволяет;
+solver_input больше не facing_open, а соответствует уже эскалированному споту.
+

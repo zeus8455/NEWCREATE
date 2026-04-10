@@ -93,6 +93,15 @@ class HandStateManager:
             bool(payload.get("legacy_from_forced_blind", False)),
         )
 
+    def _replace_street_actions(self, actions: Iterable[dict], street: str, replacement: Iterable[dict]) -> list[dict]:
+        normalized_street = str(street or "").lower()
+        preserved = [
+            dict(item)
+            for item in (actions or [])
+            if str((item or {}).get("street", "")).lower() != normalized_street
+        ]
+        return [*preserved, *self._dedupe_actions(replacement)]
+
     def _dedupe_actions(self, actions: Iterable[dict]) -> list[dict]:
         seen: set[tuple] = set()
         deduped: list[dict] = []
@@ -106,15 +115,50 @@ class HandStateManager:
 
     def _prepare_action_payloads_for_storage(self, hand: Optional[HandState], analysis: FrameAnalysis) -> tuple[list[dict], list[dict]]:
         incoming_state = dict(getattr(analysis, "action_inference", {}) or {})
+        street = str(incoming_state.get("street") or getattr(analysis, "street", "preflop") or "preflop").lower()
         incoming_actions = [dict(item) for item in list(incoming_state.get("actions_this_frame", []) or [])]
         incoming_history = [dict(item) for item in list(incoming_state.get("action_history", []) or [])]
+        incoming_resolved = [
+            dict(item)
+            for item in list(incoming_state.get("action_history_resolved", []) or incoming_history)
+        ]
 
         existing_actions = []
         existing_history = []
+        existing_resolved = []
         if hand is not None:
             existing_actions = [dict(item) for item in list(getattr(hand, "actions_log", []) or [])]
             existing_state = dict(getattr(hand, "action_state", {}) or {})
             existing_history = [dict(item) for item in list(existing_state.get("action_history", []) or [])]
+            existing_resolved = [
+                dict(item)
+                for item in list(existing_state.get("action_history_resolved", []) or existing_history)
+            ]
+
+        if street == "preflop":
+            merged_history = self._dedupe_actions(incoming_resolved)
+            existing_signatures = {self._action_signature(item) for item in existing_resolved}
+            novel_actions: list[dict] = []
+            for action in merged_history:
+                sig = self._action_signature(action)
+                if sig in existing_signatures:
+                    continue
+                existing_signatures.add(sig)
+                novel_actions.append(dict(action))
+
+            analysis.action_inference["actions_this_frame"] = [dict(item) for item in novel_actions]
+            analysis.action_inference["action_history"] = [dict(item) for item in merged_history]
+            analysis.action_inference["action_history_resolved"] = [dict(item) for item in merged_history]
+
+            reconstructed = dict(incoming_state.get("reconstructed_preflop") or {})
+            reconstructed["action_history"] = [dict(item) for item in merged_history]
+            reconstructed["action_history_resolved"] = [dict(item) for item in merged_history]
+            if "hero_context_preview" not in reconstructed and incoming_state.get("hero_context_preview") is not None:
+                reconstructed["hero_context_preview"] = dict(incoming_state.get("hero_context_preview") or {})
+            if "node_type" not in reconstructed and incoming_state.get("node_type_preview") is not None:
+                reconstructed["node_type"] = incoming_state.get("node_type_preview")
+            analysis.action_inference["reconstructed_preflop"] = reconstructed
+            return novel_actions, merged_history
 
         existing_signatures = {self._action_signature(item) for item in [*existing_actions, *existing_history]}
         novel_actions: list[dict] = []
@@ -166,7 +210,7 @@ class HandStateManager:
             table_amount_state=dict(analysis.table_amount_state),
             amount_normalization=dict(analysis.amount_normalization),
             action_state=dict(analysis.action_inference),
-            actions_log=list(novel_actions),
+            actions_log=self._replace_street_actions([], analysis.street, merged_history if str(analysis.street or "").lower() == "preflop" else novel_actions),
         )
         self._append_frame_log(hand, analysis, matched_existing=False, processing_status="ok")
         hand.processing_summary["frames_seen_for_this_hand"] += 1
@@ -276,7 +320,10 @@ class HandStateManager:
         hand.table_amount_state = dict(analysis.table_amount_state)
         hand.amount_normalization = dict(analysis.amount_normalization)
         hand.action_state = dict(analysis.action_inference)
-        hand.actions_log = self._dedupe_actions([*list(hand.actions_log), *list(novel_actions)])
+        if str(analysis.street or "").lower() == "preflop":
+            hand.actions_log = self._replace_street_actions(hand.actions_log, "preflop", merged_history)
+        else:
+            hand.actions_log = self._dedupe_actions([*list(hand.actions_log), *list(novel_actions)])
         hand.board_cards = list(analysis.board_cards) if analysis.board_cards else hand.board_cards
         hand.player_states = {position: dict(payload) for position, payload in analysis.player_states.items()}
         if analysis.street != hand.street_state.get("current_street"):
