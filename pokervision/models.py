@@ -63,6 +63,51 @@ def _normalize_count_field(value: Any) -> int:
         return 0
 
 
+def _resolve_preflop_display_nodes(
+    action_state: Optional[Dict[str, Any]],
+    advisor_input: Optional[Dict[str, Any]] = None,
+) -> tuple[str, str, Optional[str]]:
+    action_state = action_state or {}
+    advisor_input = advisor_input or {}
+
+    resolved_preflop = action_state.get("reconstructed_preflop")
+    if not isinstance(resolved_preflop, dict):
+        resolved_preflop = {}
+    hero_preview = action_state.get("hero_context_preview")
+    if not isinstance(hero_preview, dict):
+        hero_preview = {}
+    advisor_meta = advisor_input.get("meta")
+    if not isinstance(advisor_meta, dict):
+        advisor_meta = {}
+
+    projection_node_type = (
+        str(resolved_preflop.get("projection_node_type") or "").strip()
+        or str(action_state.get("projection_node_type") or "").strip()
+        or str(resolved_preflop.get("node_type") or "").strip()
+        or str(hero_preview.get("node_type") or "").strip()
+        or str(advisor_meta.get("projection_node_type") or "").strip()
+        or str(advisor_input.get("projection_node_type") or "").strip()
+        or str(action_state.get("node_type_preview") or "").strip()
+        or str(advisor_input.get("node_type") or "").strip()
+    )
+    advisor_node_type = (
+        str(resolved_preflop.get("advisor_node_type") or "").strip()
+        or str(hero_preview.get("advisor_node_type") or "").strip()
+        or str(action_state.get("advisor_node_type") or "").strip()
+        or str(advisor_meta.get("advisor_node_type") or "").strip()
+        or str(advisor_input.get("node_type") or "").strip()
+        or projection_node_type
+    )
+    advisor_mapping_reason = (
+        str(resolved_preflop.get("advisor_mapping_reason") or "").strip()
+        or str(hero_preview.get("advisor_mapping_reason") or "").strip()
+        or str(action_state.get("advisor_mapping_reason") or "").strip()
+        or str(advisor_meta.get("advisor_mapping_reason") or "").strip()
+        or None
+    )
+    return projection_node_type, advisor_node_type, advisor_mapping_reason
+
+
 def derive_reconstructed_preflop(
     action_state: Optional[Dict[str, Any]],
     *,
@@ -71,13 +116,21 @@ def derive_reconstructed_preflop(
     action_state = action_state or {}
     action_history = [
         deepcopy(item)
-        for item in action_state.get("action_history", [])
+        for item in (
+            action_state.get("action_history_resolved")
+            or action_state.get("action_history")
+            or []
+        )
         if isinstance(item, dict) and str(item.get("street") or "preflop") == "preflop"
     ]
+    projection_node_type, advisor_node_type, advisor_mapping_reason = _resolve_preflop_display_nodes(action_state)
     return {
         "street": "preflop",
         "hero_position": hero_position,
-        "node_type": action_state.get("node_type_preview"),
+        "node_type": projection_node_type,
+        "projection_node_type": projection_node_type,
+        "advisor_node_type": advisor_node_type,
+        "advisor_mapping_reason": advisor_mapping_reason,
         "opener_pos": action_state.get("opener_pos"),
         "three_bettor_pos": action_state.get("three_bettor_pos"),
         "four_bettor_pos": action_state.get("four_bettor_pos"),
@@ -162,15 +215,27 @@ def derive_analysis_panel(
         or solver_input.get("villain_positions")
         or []
     )
+    projection_node_type, advisor_node_type, advisor_mapping_reason = _resolve_preflop_display_nodes(
+        action_state,
+        advisor_input,
+    )
+    display_node_type = projection_node_type or advisor_node_type or ""
     return {
         "street": street,
         "context_type": advisor_input.get("context_type") or solver_input.get("context_type"),
-        "node_type": advisor_input.get("node_type") or action_state.get("node_type_preview") or "",
+        "node_type": display_node_type,
+        "projection_node_type": projection_node_type,
+        "advisor_node_type": advisor_node_type,
+        "advisor_mapping_reason": advisor_mapping_reason,
         "hero_position": hero_position,
         "villain_positions": list(villain_positions) if isinstance(villain_positions, list) else [],
         "player_count": len(list(occupied_positions or [])),
-        "action_history": _copy_list(action_state.get("action_history"))[-16:],
-        "reconstructed_action_history": _copy_list(action_state.get("action_history"))[-16:],
+        "action_history": _copy_list(
+            action_state.get("action_history_resolved") or action_state.get("action_history")
+        )[-16:],
+        "reconstructed_action_history": _copy_list(
+            action_state.get("action_history_resolved") or action_state.get("action_history")
+        )[-16:],
         "recommended_action": str(engine_values.get("action") or "").upper(),
         "recommended_amount_to": _trim_float(engine_values.get("amount_to")),
         "recommended_size_pct": _trim_float(engine_values.get("size_pct")),
@@ -204,9 +269,8 @@ def _compute_recommended_size_pct(engine_result: Optional[Dict[str, Any]], solve
 
 
 def _compute_node_type(action_state: Optional[Dict[str, Any]], advisor_input: Optional[Dict[str, Any]]) -> str:
-    advisor_input = advisor_input or {}
-    action_state = action_state or {}
-    value = advisor_input.get("node_type") or action_state.get("node_type_preview") or ""
+    projection_node_type, advisor_node_type, _ = _resolve_preflop_display_nodes(action_state, advisor_input)
+    value = projection_node_type or advisor_node_type or ""
     return str(value)
 
 
