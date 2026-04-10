@@ -856,434 +856,128 @@ class EngineBridge:
         return f"{raw} | combos={combo_count if combo_count is not None else '?'}"
 
     def _resolve_preflop_display_context(self, decision: HeroDecision, hand=None) -> Dict[str, str]:
+        debug = dict(decision.debug or {})
 
-    
-    debug = dict(decision.debug or {})
+        projection_node_type = None
+        advisor_node_type = debug.get("node_type")
+        advisor_mapping_reason = None
+        projection_description = None
+        advisor_description = None
 
+        pre = getattr(decision, "preflop", None)
+        if pre is not None and isinstance(getattr(pre, "meta", None), dict):
+            advisor_description = pre.meta.get("description")
 
-    
-    projection_node_type = None
+        if hand is not None:
+            action_state = getattr(hand, "action_state", None) or {}
+            if isinstance(action_state, dict):
+                projection_node_type = (
+                    action_state.get("projection_node_type")
+                    or action_state.get("node_type_preview")
+                    or action_state.get("node_type")
+                    or projection_node_type
+                )
+                advisor_node_type = action_state.get("advisor_node_type") or advisor_node_type
+                advisor_mapping_reason = action_state.get("advisor_mapping_reason") or advisor_mapping_reason
+                projection_description = action_state.get("projection_description") or projection_description
 
-    
-    advisor_node_type = debug.get("node_type")
+            advisor_input = getattr(hand, "advisor_input", None) or {}
+            if isinstance(advisor_input, dict):
+                advisor_node_type = advisor_input.get("node_type") or advisor_node_type
+                meta = advisor_input.get("meta") or {}
+                if isinstance(meta, dict):
+                    projection_node_type = meta.get("projection_node_type") or projection_node_type
+                    advisor_mapping_reason = (
+                        meta.get("advisor_mapping_reason")
+                        or meta.get("mapping_reason")
+                        or advisor_mapping_reason
+                    )
+                    projection_description = meta.get("projection_description") or projection_description
 
-    
-    advisor_mapping_reason = None
+            reconstructed_preflop = getattr(hand, "reconstructed_preflop", None) or {}
+            if isinstance(reconstructed_preflop, dict):
+                projection_node_type = reconstructed_preflop.get("node_type") or projection_node_type
+                projection_description = reconstructed_preflop.get("description") or projection_description
 
-    
-    projection_description = None
-
-    
-    advisor_description = None
-
-
-    
-    pre = getattr(decision, "preflop", None)
-
-    
-    if pre is not None and isinstance(getattr(pre, "meta", None), dict):
-
-    
-    
-    advisor_description = pre.meta.get("description")
-
-
-    
-    if hand is not None:
-
-    
-    
-    action_state = getattr(hand, "action_state", None) or {}
-
-    
-    
-    if isinstance(action_state, dict):
-
-    
-    
-    
-    projection_node_type = (
-
-    
-    
-    
-    
-    action_state.get("projection_node_type")
-
-    
-    
-    
-    
-    or action_state.get("node_type_preview")
-
-    
-    
-    
-    
-    or action_state.get("node_type")
-
-    
-    
-    
-    
-    or projection_node_type
-
-    
-    
-    
-    )
-
-    
-    
-    
-    advisor_node_type = action_state.get("advisor_node_type") or advisor_node_type
-
-    
-    
-    
-    advisor_mapping_reason = action_state.get("advisor_mapping_reason") or advisor_mapping_reason
-
-    
-    
-    
-    projection_description = action_state.get("projection_description") or projection_description
-
-
-    
-    
-    advisor_input = getattr(hand, "advisor_input", None) or {}
-
-    
-    
-    if isinstance(advisor_input, dict):
-
-    
-    
-    
-    advisor_node_type = advisor_input.get("node_type") or advisor_node_type
-
-    
-    
-    
-    meta = advisor_input.get("meta") or {}
-
-    
-    
-    
-    if isinstance(meta, dict):
-
-    
-    
-    
-    
-    projection_node_type = meta.get("projection_node_type") or projection_node_type
-
-    
-    
-    
-    
-    advisor_mapping_reason = (
-
-    
-    
-    
-    
-    
-    meta.get("advisor_mapping_reason")
-
-    
-    
-    
-    
-    
-    or meta.get("mapping_reason")
-
-    
-    
-    
-    
-    
-    or advisor_mapping_reason
-
-    
-    
-    
-    
-    )
-
-    
-    
-    
-    
-    projection_description = meta.get("projection_description") or projection_description
-
-
-    
-    
-    reconstructed_preflop = getattr(hand, "reconstructed_preflop", None) or {}
-
-    
-    
-    if isinstance(reconstructed_preflop, dict):
-
-    
-    
-    
-    projection_node_type = reconstructed_preflop.get("node_type") or projection_node_type
-
-    
-    
-    
-    projection_description = reconstructed_preflop.get("description") or projection_description
-
-
-    
-    display_node_type = projection_node_type or advisor_node_type or "-"
-
-    
-    return {
-
-    
-    
-    "display_node_type": str(display_node_type),
-
-    
-    
-    "projection_node_type": str(projection_node_type) if projection_node_type else "",
-
-    
-    
-    "advisor_node_type": str(advisor_node_type) if advisor_node_type else "",
-
-    
-    
-    "advisor_mapping_reason": str(advisor_mapping_reason) if advisor_mapping_reason else "",
-
-    
-    
-    "projection_description": str(projection_description) if projection_description else "",
-
-    
-    
-    "advisor_description": str(advisor_description) if advisor_description else "",
-
-    
-    }
-
+        display_node_type = projection_node_type or advisor_node_type or "-"
+        return {
+            "display_node_type": str(display_node_type),
+            "projection_node_type": str(projection_node_type) if projection_node_type else "",
+            "advisor_node_type": str(advisor_node_type) if advisor_node_type else "",
+            "advisor_mapping_reason": str(advisor_mapping_reason) if advisor_mapping_reason else "",
+            "projection_description": str(projection_description) if projection_description else "",
+            "advisor_description": str(advisor_description) if advisor_description else "",
+        }
 
     def _build_preflop_analysis_text(self, decision: HeroDecision, hand=None) -> str:
-
-    
-    lines: List[str] = []
-
-    
-    pre = decision.preflop
-
-
-    
-    lines.append("=== PREFLOP ANALYSIS ===")
-
-    
-    lines.append(f"Recommendation: {self._display_action(decision)}")
-
-    
-    lines.append(f"Reason: {decision.reason}")
-
-    
-    if decision.confidence is not None:
-
-    
-    
-    lines.append(f"Confidence: {float(decision.confidence):.2f}")
-
-    
-    lines.append("")
-
-
-    
-    if hand is not None:
-
-    
-    
-    lines.append(f"Hand ID: {hand.hand_id}")
-
-    
-    
-    lines.append(f"Hero position (vision): {hand.hero_position}")
-
-    
-    
-    lines.append(f"Hero cards: {' '.join(hand.hero_cards)}")
-
-    
-    
-    lines.append("")
-
-
-    
-    if pre is None:
-
-    
-    
-    lines.append("Preflop decision payload is empty.")
-
-    
-    
-    return "
-".join(lines)
-
-
-    
-    debug = dict(decision.debug or {})
-
-    
-    display_ctx = self._resolve_preflop_display_context(decision, hand=hand)
-
-
-    
-    lines.append(f"Tree / node_type: {display_ctx['display_node_type']}")
-
-    
-    lines.append(f"Range owner: {debug.get('range_owner', '-')}")
-
-    
-    if (
-
-    
-    
-    display_ctx["projection_node_type"]
-
-    
-    
-    and display_ctx["advisor_node_type"]
-
-    
-    
-    and display_ctx["projection_node_type"] != display_ctx["advisor_node_type"]
-
-    
-    ):
-
-    
-    
-    lines.append(f"Advisor mapped node: {display_ctx['advisor_node_type']}")
-
-    
-    if display_ctx["advisor_mapping_reason"]:
-
-    
-    
-    lines.append(f"Advisor mapping reason: {display_ctx['advisor_mapping_reason']}")
-
-
-    
-    lines.append(f"Hero hand class: {pre.hand_class}")
-
-
-    
-    description = display_ctx["projection_description"] or display_ctx["advisor_description"]
-
-    
-    if description:
-
-    
-    
-    lines.append(f"Description: {description}")
-
-
-    
-    if (
-
-    
-    
-    display_ctx["projection_description"]
-
-    
-    
-    and display_ctx["advisor_description"]
-
-    
-    
-    and display_ctx["projection_description"] != display_ctx["advisor_description"]
-
-    
-    ):
-
-    
-    
-    lines.append(f"Advisor chart description: {display_ctx['advisor_description']}")
-
-
-    
-    lines.append(f"Matching actions: {', '.join(pre.matching_actions) if pre.matching_actions else '-'}")
-
-    
-    lines.append(f"Chosen action: {pre.action}")
-
-    
-    lines.append(f"Selected range expr: {pre.selected_range_expr or '-'}")
-
-    
-    if pre.fallback_reason:
-
-    
-    
-    lines.append(f"Fallback reason: {pre.fallback_reason}")
-
-
-    
-    lines.append("")
-
-    
-    lines.append("Action map / chart branches:")
-
-    
-    if pre.action_map:
-
-    
-    
-    for action_name, expr in pre.action_map.items():
-
-    
-    
-    
-    lines.append(f" {action_name:<10} -> {expr}")
-
-    
-    else:
-
-    
-    
-    lines.append(" <empty>")
-
-
-    
-    lines.append("")
-
-    
-    lines.append(f"Chosen branch range source: {self._format_range_source(pre.range_source)}")
-
-    
-    lines.append("")
-
-    
-    lines.append(
-
-    
-    
-    "Note: preflop layer is chart/tree based. EV branches are not calculated here; "
-
-    
-    
-    "the file shows the exact node and chart branch used."
-
-    
-    )
-
-    
-    return "
-".join(lines)
-
+        lines: List[str] = []
+        pre = decision.preflop
+
+        lines.append("=== PREFLOP ANALYSIS ===")
+        lines.append(f"Recommendation: {self._display_action(decision)}")
+        lines.append(f"Reason: {decision.reason}")
+        if decision.confidence is not None:
+            lines.append(f"Confidence: {float(decision.confidence):.2f}")
+        lines.append("")
+
+        if hand is not None:
+            lines.append(f"Hand ID: {hand.hand_id}")
+            lines.append(f"Hero position (vision): {hand.hero_position}")
+            lines.append(f"Hero cards: {' '.join(hand.hero_cards)}")
+            lines.append("")
+
+        if pre is None:
+            lines.append("Preflop decision payload is empty.")
+            return "\n".join(lines)
+
+        debug = dict(decision.debug or {})
+        display_ctx = self._resolve_preflop_display_context(decision, hand=hand)
+
+        lines.append(f"Tree / node_type: {display_ctx['display_node_type']}")
+        lines.append(f"Range owner: {debug.get('range_owner', '-')}")
+        if (
+            display_ctx["projection_node_type"]
+            and display_ctx["advisor_node_type"]
+            and display_ctx["projection_node_type"] != display_ctx["advisor_node_type"]
+        ):
+            lines.append(f"Advisor mapped node: {display_ctx['advisor_node_type']}")
+            if display_ctx["advisor_mapping_reason"]:
+                lines.append(f"Advisor mapping reason: {display_ctx['advisor_mapping_reason']}")
+
+        lines.append(f"Hero hand class: {pre.hand_class}")
+
+        description = display_ctx["projection_description"] or display_ctx["advisor_description"]
+        if description:
+            lines.append(f"Description: {description}")
+        if (
+            display_ctx["projection_description"]
+            and display_ctx["advisor_description"]
+            and display_ctx["projection_description"] != display_ctx["advisor_description"]
+        ):
+            lines.append(f"Advisor chart description: {display_ctx['advisor_description']}")
+
+        lines.append(f"Matching actions: {', '.join(pre.matching_actions) if pre.matching_actions else '-'}")
+        lines.append(f"Chosen action: {pre.action}")
+        lines.append(f"Selected range expr: {pre.selected_range_expr or '-'}")
+        if pre.fallback_reason:
+            lines.append(f"Fallback reason: {pre.fallback_reason}")
+
+        lines.append("")
+        lines.append("Action map / chart branches:")
+        if pre.action_map:
+            for action_name, expr in pre.action_map.items():
+                lines.append(f" {action_name:<10} -> {expr}")
+        else:
+            lines.append(" <empty>")
+
+        lines.append("")
+        lines.append(f"Chosen branch range source: {self._format_range_source(pre.range_source)}")
+        lines.append("")
+        lines.append(
+            "Note: preflop layer is chart/tree based. EV branches are not calculated here; "
+            "the file shows the exact node and chart branch used."
+        )
+        return "\n".join(lines)
 
     def _append_postflop_range_narrowing(self, lines: List[str], decision: HeroDecision) -> None:
         meta = {}
