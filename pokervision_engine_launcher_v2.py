@@ -1062,25 +1062,40 @@ class EngineBridge:
 
     def _resolve_state_analysis_context(self, render_state: dict, hand=None) -> Dict[str, Any]:
         panel = render_state.get("analysis_panel") or {}
-        range_debug = render_state.get("range_debug") or {}
-        debug_payload = render_state.get("hero_decision_debug") or {}
+        if not isinstance(panel, dict):
+            panel = {}
+        range_debug = panel.get("range_debug") or render_state.get("range_debug") or {}
+        if not isinstance(range_debug, dict):
+            range_debug = {}
+        debug_payload = panel.get("hero_decision_debug") or render_state.get("hero_decision_debug") or {}
+        if not isinstance(debug_payload, dict):
+            debug_payload = {}
         debug = debug_payload.get("debug") if isinstance(debug_payload, dict) else {}
         if not isinstance(debug, dict):
             debug = {}
         meta = range_debug.get("meta") or {}
         if not isinstance(meta, dict):
             meta = {}
+        report = range_debug.get("report") or {}
+        if not isinstance(report, dict):
+            report = {}
+        postflop_payload = debug_payload.get("postflop") if isinstance(debug_payload, dict) else {}
+        if not isinstance(postflop_payload, dict):
+            postflop_payload = {}
+        hero_cards = list(render_state.get("hero_cards") or getattr(hand, "hero_cards", []) or [])
+        board_cards = list(render_state.get("board_cards") or getattr(hand, "board_cards", []) or [])
         return {
             "street": str(render_state.get("street") or (getattr(hand, "street_state", {}) or {}).get("current_street") or "-"),
-            "recommended_action": str(render_state.get("recommended_action") or "NO DECISION"),
-            "reason": str(render_state.get("decision_reason") or ""),
-            "confidence": render_state.get("decision_confidence"),
+            "recommended_action": str(render_state.get("recommended_action") or panel.get("recommended_action") or "NO DECISION"),
+            "reason": str(render_state.get("decision_reason") or panel.get("decision_reason") or ""),
+            "confidence": render_state.get("decision_confidence") if render_state.get("decision_confidence") is not None else panel.get("decision_confidence"),
             "node_type": str(panel.get("node_type") or render_state.get("node_type") or meta.get("projection_node_type") or "-"),
             "projection_node_type": str(panel.get("projection_node_type") or render_state.get("node_type") or meta.get("projection_node_type") or ""),
             "advisor_node_type": str(panel.get("advisor_node_type") or meta.get("advisor_node_type") or debug.get("node_type") or ""),
             "advisor_mapping_reason": str(panel.get("advisor_mapping_reason") or meta.get("advisor_mapping_reason") or ""),
-            "hero_position": str(render_state.get("hero_position") or getattr(hand, "hero_position", "-")),
-            "hero_cards": list(render_state.get("hero_cards") or getattr(hand, "hero_cards", []) or []),
+            "hero_position": str(render_state.get("hero_position") or panel.get("hero_position") or getattr(hand, "hero_position", "-")),
+            "hero_cards": hero_cards,
+            "board_cards": board_cards,
             "range_owner": str(debug.get("range_owner") or "hero"),
             "hand_class": str(range_debug.get("hand_class") or "-"),
             "description": str(meta.get("description") or ""),
@@ -1089,6 +1104,22 @@ class EngineBridge:
             "selected_range_expr": str(range_debug.get("selected_range_expr") or "-"),
             "action_map": dict(range_debug.get("action_map") or {}),
             "fallback_reason": range_debug.get("fallback_reason"),
+            "recommended_amount_to": render_state.get("recommended_amount_to") if render_state.get("recommended_amount_to") is not None else panel.get("recommended_amount_to"),
+            "recommended_size_pct": render_state.get("recommended_size_pct") if render_state.get("recommended_size_pct") is not None else panel.get("recommended_size_pct"),
+            "engine_status": str(render_state.get("engine_status") or panel.get("engine_status") or ""),
+            "solver_status": str(panel.get("solver_status") or ""),
+            "solver_reused": bool(panel.get("solver_reused") or render_state.get("solver_result_reused") or False),
+            "solver_reuse_reason": str(panel.get("solver_reuse_reason") or render_state.get("solver_reuse_reason") or ""),
+            "pot_before_hero": report.get("pot_before_hero", self._pot_before_hero(hand) if hand is not None else None),
+            "to_call": report.get("to_call", self._to_call(hand) if hand is not None else None),
+            "effective_stack": report.get("effective_stack", self._effective_stack(hand) if hand is not None else None),
+            "hero_equity": range_debug.get("hero_equity") if range_debug.get("hero_equity") is not None else postflop_payload.get("hero_equity"),
+            "realized_equity": range_debug.get("realized_equity") if range_debug.get("realized_equity") is not None else postflop_payload.get("realized_equity"),
+            "villain_sources": list(range_debug.get("villain_sources") or postflop_payload.get("villain_sources") or []),
+            "report": report,
+            "line_context": report.get("line_context") if isinstance(report, dict) else {},
+            "hero_tags": list(report.get("hero_tags") or []),
+            "range_debug": range_debug,
         }
 
     def build_analysis_text_from_render_state(self, render_state: dict, hand=None) -> str:
@@ -1106,27 +1137,111 @@ class EngineBridge:
         lines.append(f"Hero position (vision): {ctx['hero_position']}")
         if ctx["hero_cards"]:
             lines.append(f"Hero cards: {' '.join(ctx['hero_cards'])}")
+        if street != "preflop" and ctx.get("board_cards"):
+            lines.append(f"Board: {' '.join(ctx['board_cards'])}")
         lines.append("")
-        lines.append(f"Tree / node_type: {ctx['node_type']}")
-        if ctx["projection_node_type"] and ctx["advisor_node_type"] and ctx["projection_node_type"] != ctx["advisor_node_type"]:
-            lines.append(f"Advisor mapped node: {ctx['advisor_node_type']}")
-            if ctx["advisor_mapping_reason"]:
-                lines.append(f"Advisor mapping reason: {ctx['advisor_mapping_reason']}")
-        lines.append(f"Range owner: {ctx['range_owner']}")
-        lines.append(f"Hero hand class: {ctx['hand_class']}")
-        if ctx["description"]:
-            lines.append(f"Description: {ctx['description']}")
-        ma = ctx["matching_actions"]
-        lines.append(f"Matching actions: {', '.join(ma) if ma else '-'}")
-        lines.append(f"Chosen action: {ctx['chosen_action']}")
-        lines.append(f"Selected range expr: {ctx['selected_range_expr']}")
-        if ctx["fallback_reason"]:
-            lines.append(f"Fallback reason: {ctx['fallback_reason']}")
-        if ctx["action_map"]:
+
+        if street == "preflop":
+            lines.append(f"Tree / node_type: {ctx['node_type']}")
+            if ctx["projection_node_type"] and ctx["advisor_node_type"] and ctx["projection_node_type"] != ctx["advisor_node_type"]:
+                lines.append(f"Advisor mapped node: {ctx['advisor_node_type']}")
+                if ctx["advisor_mapping_reason"]:
+                    lines.append(f"Advisor mapping reason: {ctx['advisor_mapping_reason']}")
+            lines.append(f"Range owner: {ctx['range_owner']}")
+            lines.append(f"Hero hand class: {ctx['hand_class']}")
+            if ctx["description"]:
+                lines.append(f"Description: {ctx['description']}")
+            ma = ctx["matching_actions"]
+            lines.append(f"Matching actions: {', '.join(ma) if ma else '-'}")
+            lines.append(f"Chosen action: {ctx['chosen_action']}")
+            lines.append(f"Selected range expr: {ctx['selected_range_expr']}")
+            if ctx["fallback_reason"]:
+                lines.append(f"Fallback reason: {ctx['fallback_reason']}")
+            if ctx["action_map"]:
+                lines.append("")
+                lines.append("Action map / chart branches:")
+                for action_name, expr in ctx["action_map"].items():
+                    lines.append(f" {action_name:<10} -> {expr}")
+            return "\n".join(lines)
+
+        pot_before = ctx.get("pot_before_hero")
+        to_call = ctx.get("to_call")
+        effective_stack = ctx.get("effective_stack")
+        if pot_before is not None:
+            lines.append(f"Pot before HERO: {float(pot_before):.2f}")
+        if to_call is not None:
+            lines.append(f"To call: {float(to_call):.2f}")
+        if effective_stack is not None:
+            lines.append(f"Effective stack: {float(effective_stack):.2f}")
+        if ctx.get("recommended_size_pct") is not None:
+            lines.append(f"Recommended size: {float(ctx['recommended_size_pct']):.1f}% pot")
+        if ctx.get("recommended_amount_to") is not None:
+            lines.append(f"Recommended amount to: {float(ctx['recommended_amount_to']):.2f}")
+        if ctx.get("hero_equity") is not None:
+            lines.append(f"Hero equity: {float(ctx['hero_equity']):.4f}")
+        if ctx.get("realized_equity") is not None:
+            lines.append(f"Realized equity: {float(ctx['realized_equity']):.4f}")
+        if ctx.get("engine_status"):
+            lines.append(f"Engine status: {ctx['engine_status']}")
+        if ctx.get("solver_reused"):
+            reuse_reason = ctx.get("solver_reuse_reason") or "same_fingerprint"
+            lines.append(f"Solver reused: yes ({reuse_reason})")
+        lines.append("")
+
+        report = ctx.get("report") or {}
+        if isinstance(report, dict) and report:
+            try:
+                lines.append(format_hero_decision_report(report))
+            except Exception:
+                recommended_option = report.get("recommended_option") if isinstance(report.get("recommended_option"), dict) else {}
+                if recommended_option:
+                    lines.append("=== POSTFLOP EV SUMMARY ===")
+                    lines.append(f"Recommended option: {recommended_option.get('action', '-')}")
+                    if recommended_option.get("ev") is not None:
+                        lines.append(f"Recommended EV: {float(recommended_option['ev']):.6f}")
+                    if recommended_option.get("size_pct") is not None:
+                        lines.append(f"Recommended size pct: {float(recommended_option['size_pct']):.1f}")
+                    if recommended_option.get("amount_to") is not None:
+                        lines.append(f"Recommended amount to: {float(recommended_option['amount_to']):.2f}")
+                size_reports = report.get("size_reports") if isinstance(report.get("size_reports"), list) else []
+                if size_reports:
+                    lines.append("")
+                    lines.append("=== SIZE REPORTS ===")
+                    for item in size_reports:
+                        if not isinstance(item, dict):
+                            continue
+                        action = str(item.get("action") or "-")
+                        ev_value = item.get("ev")
+                        amount_to = item.get("amount_to")
+                        size_pct = item.get("size_pct")
+                        gate_status = str(item.get("gate_status") or "-")
+                        fragments = [f"{action}"]
+                        if size_pct is not None:
+                            fragments.append(f"{float(size_pct):.1f}%")
+                        if amount_to is not None:
+                            fragments.append(f"to {float(amount_to):.2f}")
+                        if ev_value is not None:
+                            fragments.append(f"EV {float(ev_value):.6f}")
+                        fragments.append(f"gate={gate_status}")
+                        lines.append(" | ".join(fragments))
+        else:
+            lines.append("Postflop report is empty.")
+
+        villain_sources = ctx.get("villain_sources") or []
+        if villain_sources:
             lines.append("")
-            lines.append("Action map / chart branches:")
-            for action_name, expr in ctx["action_map"].items():
-                lines.append(f" {action_name:<10} -> {expr}")
+            lines.append("=== VILLAIN SOURCES ===")
+            for source in villain_sources:
+                if not isinstance(source, dict):
+                    continue
+                name = str(source.get("name") or "Villain")
+                source_type = str(source.get("source_type") or "-")
+                raw_expr = str(source.get("raw_expr") or source.get("normalized_expr") or "-")
+                combo_count = source.get("combo_count")
+                suffix = f" | combos={combo_count}" if combo_count is not None else ""
+                lines.append(f"{name}: {source_type}{suffix}")
+                lines.append(f"  range: {raw_expr}")
+
         return "\n".join(lines)
 
     def format_existing_render_state_for_ui(self, render_state: Optional[dict], hand=None) -> Optional[Dict[str, Any]]:
