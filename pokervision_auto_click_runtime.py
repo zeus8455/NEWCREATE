@@ -51,6 +51,7 @@ BUTTON_CALL = "CALL"
 BUTTON_RAISE = "Raise"
 BUTTON_CHECK_FOLD = "Check/fold"
 BUTTON_CHECK = "check"
+
 BUTTON_CLASS_NAMES = (
     BUTTON_FOLD,
     BUTTON_33,
@@ -226,24 +227,31 @@ class AutoClickConfig:
     auto_build_button_detector: bool = True
     force_primary_monitor_capture: bool = True
     debug_root_dir: str = str(Path.cwd() / "autoclick_debug")
+
     detector_conf_default: float = 0.40
     detector_conf_raise: float = 0.35
     detector_conf_check: float = 0.35
     button_detection_ttl_ms: int = 900
     nms_iou_threshold: float = 0.45
-    timeout_default_sec: float = 10.0
-    timeout_big_pot_extra_sec: float = 9.0
-    timeout_big_pot_threshold_bb: float = 20.0
+
+    decision_settle_delay_sec: float = 2.0
+    timeout_default_sec: float = 8.0
+    timeout_big_pot_extra_sec: float = 8.0
+    timeout_big_pot_threshold_bb: float = 16.0
+    error_grace_sec: float = 4.0
+
     retry_count_max: int = 3
     retry_total_budget_ms: int = 900
     retry_sleep_ms_min: int = 40
     retry_sleep_ms_max: int = 120
-    scroll_enabled_probability: float = 0.0
-    scroll_direction_up_probability: float = 0.50
+
+    scroll_enabled_probability: float = 0.55
+    scroll_direction_up_probability: float = 1.0
     scroll_steps_min: int = 1
-    scroll_steps_max: int = 2
+    scroll_steps_max: int = 3
     scroll_pause_ms_min: int = 25
     scroll_pause_ms_max: int = 60
+
     move_duration_ms_min: int = 140
     move_duration_ms_max: int = 360
     target_jitter_px_min: int = 3
@@ -256,8 +264,8 @@ class AutoClickConfig:
     idle_pause_sec_max: float = 14.0
     idle_move_distance_px_min: int = 20
     idle_move_distance_px_max: int = 140
-    secondary_click_settle_ms_min: int = 15
-    secondary_click_settle_ms_max: int = 45
+    secondary_click_settle_ms_min: int = 0
+    secondary_click_settle_ms_max: int = 0
     secondary_retry_recapture: bool = True
     log_prefix: str = "[AutoClick]"
 
@@ -297,6 +305,7 @@ class WindowsMouseBackend:
     def get_position(self) -> Tuple[int, int]:
         class POINT(ctypes.Structure):
             _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
         point = POINT()
         self._user32.GetCursorPos(ctypes.byref(point))
         return int(point.x), int(point.y)
@@ -382,6 +391,10 @@ class YoloButtonDetector:
         return detections
 
 
+def build_default_button_detector(config: AutoClickConfig) -> ButtonDetectorProtocol:
+    return YoloButtonDetector(config.button_model_path, conf=config.detector_conf_default)
+
+
 class AutoClickRuntime:
     def __init__(
         self,
@@ -397,18 +410,27 @@ class AutoClickRuntime:
         self.button_detector = button_detector
         if self.button_detector is None and self.config.auto_build_button_detector:
             self.button_detector = build_default_button_detector(self.config)
+
         self.state = STATE_IDLE
         self.execution_lock = False
         self.locked_until_reset = False
         self.last_cycle_key: Optional[str] = None
         self.last_hand_id: Optional[str] = None
         self.wait_started_at: Optional[float] = None
+        self.error_started_at: Optional[float] = None
         self.post_click_until = 0.0
         self.last_idle_move_at = 0.0
         self.next_idle_at = self._schedule_next_idle(time.monotonic())
+
         self.last_plan_name: Optional[str] = None
         self.last_normalized_action: Optional[str] = None
         self.last_raw_action: Optional[str] = None
+        self.last_executed_decision_key: Optional[str] = None
+
+        self.pending_decision_key: Optional[str] = None
+        self.pending_decision_since: Optional[float] = None
+        self.pending_plan: Optional[AutoClickPlan] = None
+
         self.debug_root = Path(self.config.debug_root_dir).expanduser().resolve()
         self.debug_root.mkdir(parents=True, exist_ok=True)
 
@@ -441,11 +463,29 @@ class AutoClickRuntime:
         hand_id = None
         total_pot_bb = None
         meta: Dict[str, object] = {}
+
         if hero_decision is not None:
             street = str(getattr(hero_decision, "street", street) or street).lower()
             debug = getattr(hero_decision, "debug", {}) or {}
             if isinstance(debug, dict):
-                meta.update({str(k): v for k, v in debug.items() if k in {"node_type", "opener_pos", "three_bettor_pos", "four_bettor_pos", "limpers", "callers"}})
+                for key in (
+                    "node_type",
+                    "opener_pos",
+                    "three_bettor_pos",
+                    "four_bettor_pos",
+                    "limpers",
+                    "callers",
+                    "solver_fingerprint",
+                    "decision_id",
+                    "source_frame_id",
+                ):
+                    if key in debug:
+                        meta[str(key)] = debug[key]
+            for key in ("solver_fingerprint", "decision_id", "source_frame_id"):
+                value = getattr(hero_decision, key, None)
+                if value is not None and key not in meta:
+                    meta[key] = value
+
         if hand is not None:
             hand_id = getattr(hand, "hand_id", None)
             street_state = getattr(hand, "street_state", None)
@@ -460,6 +500,7 @@ class AutoClickRuntime:
                         total_pot_bb = None if amount is None else float(amount)
                     except Exception:
                         total_pot_bb = None
+
         return AutoClickSnapshot(
             active_hero_present=bool(active_hero_present),
             hero_decision=hero_decision,
@@ -480,9 +521,16 @@ class AutoClickRuntime:
             frame_source="launcher_frame",
         )
 
-    def step(self, snapshot: AutoClickSnapshot, *, frame_bgr: Any = None, detections: Optional[Sequence[ButtonDetection]] = None) -> AutoClickResult:
+    def step(
+        self,
+        snapshot: AutoClickSnapshot,
+        *,
+        frame_bgr: Any = None,
+        detections: Optional[Sequence[ButtonDetection]] = None,
+    ) -> AutoClickResult:
         now = time.monotonic()
         events: List[AutoClickEvent] = []
+
         if not self.config.enabled:
             return AutoClickResult(state=self.state, events=events)
 
@@ -494,14 +542,14 @@ class AutoClickRuntime:
             self.state = STATE_IDLE
             self.locked_until_reset = False
             self.execution_lock = False
+            self._clear_pending_decision()
+            self.error_started_at = None
             if self.config.enable_idle_movement:
                 self._maybe_idle_move(now, events)
             return AutoClickResult(state=self.state, events=events)
 
         if self.wait_started_at is None:
             self.wait_started_at = float(snapshot.decision_started_at or now)
-            self.state = STATE_ACTIVE_HERO_WAITING_DECISION
-            events.append(self._event("active_hero_detected", hand_id=snapshot.hand_id or "", street=snapshot.street))
             events.append(self._event("decision_wait_started", started_at=self.wait_started_at))
 
         frame_used, capture_meta = self._get_detection_frame(snapshot, frame_bgr)
@@ -512,19 +560,45 @@ class AutoClickRuntime:
             except Exception as exc:
                 LOGGER.exception("%s button detector failed", self.config.log_prefix)
                 events.append(self._event("button_detector_error", error=str(exc)))
+
         filtered = self._prepare_detections(raw_detections, snapshot)
         self._write_debug_observation(snapshot, frame_used, raw_detections, filtered, capture_meta)
 
         if now < self.post_click_until:
             self.state = STATE_POST_CLICK_COOLDOWN
-            return AutoClickResult(state=self.state, locked=True, events=events)
+            return AutoClickResult(
+                state=self.state,
+                locked=True,
+                plan_name=self.last_plan_name,
+                normalized_action=self.last_normalized_action,
+                raw_action=self.last_raw_action,
+                events=events,
+            )
 
         if snapshot.critical_error_flag:
+            if self.error_started_at is None:
+                self.error_started_at = now
+                events.append(self._event("critical_error_detected", error=snapshot.critical_error_text or "critical_error"))
+            error_elapsed = now - self.error_started_at
+            if error_elapsed < float(self.config.error_grace_sec):
+                self.state = STATE_ACTIVE_HERO_WAITING_DECISION
+                self._clear_pending_decision()
+                events.append(
+                    self._event(
+                        "critical_error_grace_wait",
+                        elapsed_sec=round(error_elapsed, 3),
+                        grace_sec=float(self.config.error_grace_sec),
+                    )
+                )
+                return AutoClickResult(state=self.state, events=events)
             self.state = STATE_FAILSAFE_EXECUTION
             plan = self._build_failsafe_plan(filtered, reason=snapshot.critical_error_text or "critical_error")
+            events.append(self._event("critical_error_failsafe", reason=plan.raw_action))
             executed = self._execute_plan(plan, filtered, snapshot, events)
             self._write_debug_plan(snapshot, plan, filtered, executed)
             return self._result_from_state(plan, executed, events, locked=executed)
+        else:
+            self.error_started_at = None
 
         if self.locked_until_reset:
             self.state = STATE_LOCKED_UNTIL_RESET
@@ -550,25 +624,94 @@ class AutoClickRuntime:
 
         if not snapshot.decision_ready or snapshot.hero_decision is None:
             self.state = STATE_ACTIVE_HERO_WAITING_DECISION
+            self._clear_pending_decision()
             return AutoClickResult(state=self.state, events=events)
 
         self.state = STATE_DECISION_READY
         raw_action = self._resolve_raw_action(snapshot.hero_decision)
         normalized = self._normalize_action(snapshot)
         plan = self._build_click_plan(normalized, raw_action)
+        decision_key = self._decision_key(snapshot, plan)
+
         self.last_plan_name = plan.plan_name
         self.last_normalized_action = plan.normalized_action
         self.last_raw_action = plan.raw_action
+
         events.append(self._event("decision_received", raw_action=raw_action, normalized_action=normalized, street=snapshot.street))
-        events.append(self._event("click_plan_built", plan_name=plan.plan_name, primary_button=plan.primary_button, secondary_button=plan.secondary_button or ""))
+        events.append(
+            self._event(
+                "click_plan_built",
+                plan_name=plan.plan_name,
+                primary_button=plan.primary_button,
+                secondary_button=plan.secondary_button or "",
+                decision_key=decision_key,
+            )
+        )
+
+        if decision_key == self.last_executed_decision_key:
+            events.append(self._event("duplicate_decision_ignored", decision_key=decision_key))
+            return AutoClickResult(
+                state=self.state,
+                executed=False,
+                locked=False,
+                plan_name=plan.plan_name,
+                normalized_action=plan.normalized_action,
+                raw_action=plan.raw_action,
+                events=events,
+            )
+
+        if decision_key != self.pending_decision_key:
+            self.pending_decision_key = decision_key
+            self.pending_decision_since = now
+            self.pending_plan = plan
+            events.append(
+                self._event(
+                    "decision_candidate_started",
+                    decision_key=decision_key,
+                    settle_delay_sec=float(self.config.decision_settle_delay_sec),
+                )
+            )
+            return AutoClickResult(
+                state=self.state,
+                executed=False,
+                locked=False,
+                plan_name=plan.plan_name,
+                normalized_action=plan.normalized_action,
+                raw_action=plan.raw_action,
+                events=events,
+            )
+
+        settle_elapsed = now - float(self.pending_decision_since or now)
+        if settle_elapsed < float(self.config.decision_settle_delay_sec):
+            events.append(
+                self._event(
+                    "decision_settling",
+                    decision_key=decision_key,
+                    elapsed_sec=round(settle_elapsed, 3),
+                    settle_delay_sec=float(self.config.decision_settle_delay_sec),
+                )
+            )
+            return AutoClickResult(
+                state=self.state,
+                executed=False,
+                locked=False,
+                plan_name=plan.plan_name,
+                normalized_action=plan.normalized_action,
+                raw_action=plan.raw_action,
+                events=events,
+            )
+
         executed = self._execute_plan(plan, filtered, snapshot, events)
         self._write_debug_plan(snapshot, plan, filtered, executed)
+        if executed:
+            self.last_executed_decision_key = decision_key
         return self._result_from_state(plan, executed, events, locked=executed)
 
     def _cycle_key(self, snapshot: AutoClickSnapshot) -> str:
+        base = f"started:{float(snapshot.decision_started_at):.6f}"
         if snapshot.hand_id:
-            return f"hand:{snapshot.hand_id}"
-        return f"started:{snapshot.decision_started_at:.6f}"
+            return f"hand:{snapshot.hand_id}:{base}"
+        return base
 
     def _should_reset_cycle(self, snapshot: AutoClickSnapshot, cycle_key: str) -> bool:
         if self.last_cycle_key is None:
@@ -587,14 +730,22 @@ class AutoClickRuntime:
         self.execution_lock = False
         self.locked_until_reset = False
         self.wait_started_at = float(snapshot.decision_started_at or now)
+        self.error_started_at = None
         self.post_click_until = 0.0
         self.last_cycle_key = cycle_key
         self.last_hand_id = snapshot.hand_id
         self.last_plan_name = None
         self.last_raw_action = None
         self.last_normalized_action = None
+        self.last_executed_decision_key = None
+        self._clear_pending_decision()
         self.state = STATE_ACTIVE_HERO_WAITING_DECISION if snapshot.active_hero_present else STATE_IDLE
-        return [self._event("cycle_reset", hand_id=snapshot.hand_id or "", state=self.state)]
+        return [self._event("cycle_reset", hand_id=snapshot.hand_id or "", state=self.state, cycle_key=cycle_key)]
+
+    def _clear_pending_decision(self) -> None:
+        self.pending_decision_key = None
+        self.pending_decision_since = None
+        self.pending_plan = None
 
     def _schedule_next_idle(self, now: float) -> float:
         return now + self.rng.uniform(self.config.idle_pause_sec_min, self.config.idle_pause_sec_max)
@@ -620,11 +771,17 @@ class AutoClickRuntime:
                 snapshot.monitor_top = int(meta.get("top", 0))
                 snapshot.monitor_width = int(meta.get("width", 0))
                 snapshot.monitor_height = int(meta.get("height", 0))
-                snapshot.monitor_name = "primary"
-                snapshot.frame_source = "mss_primary_monitor"
+                snapshot.monitor_name = str(meta.get("name", "primary"))
                 return frame, meta
-        snapshot.frame_source = "launcher_frame"
-        return frame_bgr, {
+        if frame_bgr is not None:
+            return frame_bgr, {
+                "name": snapshot.monitor_name,
+                "left": snapshot.monitor_left,
+                "top": snapshot.monitor_top,
+                "width": snapshot.monitor_width,
+                "height": snapshot.monitor_height,
+            }
+        return None, {
             "name": snapshot.monitor_name,
             "left": snapshot.monitor_left,
             "top": snapshot.monitor_top,
@@ -635,21 +792,23 @@ class AutoClickRuntime:
     def _capture_primary_monitor(self) -> Optional[Tuple[Any, Dict[str, object]]]:
         if mss is None or np is None:
             return None
-        with mss.mss() as sct:
-            if len(sct.monitors) < 2:
-                return None
-            monitor = dict(sct.monitors[1])
-            shot = sct.grab(monitor)
-            frame = np.array(shot)
-            if frame.ndim == 3 and frame.shape[2] == 4:
-                frame = frame[:, :, :3]
-            return frame, {
-                "name": "primary",
-                "left": int(monitor.get("left", 0)),
-                "top": int(monitor.get("top", 0)),
-                "width": int(monitor.get("width", 0)),
-                "height": int(monitor.get("height", 0)),
-            }
+        try:
+            with mss.mss() as sct:
+                monitor = dict(sct.monitors[1])
+                shot = sct.grab(monitor)
+                frame = np.array(shot)
+                if frame.ndim == 3 and frame.shape[2] == 4:
+                    frame = frame[:, :, :3]
+                return frame, {
+                    "name": "primary",
+                    "left": int(monitor.get("left", 0)),
+                    "top": int(monitor.get("top", 0)),
+                    "width": int(monitor.get("width", 0)),
+                    "height": int(monitor.get("height", 0)),
+                }
+        except Exception:
+            LOGGER.exception("%s primary monitor capture failed", self.config.log_prefix)
+            return None
 
     def _resolve_timeout(self, snapshot: AutoClickSnapshot) -> float:
         timeout = float(self.config.timeout_default_sec)
@@ -690,7 +849,16 @@ class AutoClickRuntime:
             try:
                 return float(value)
             except Exception:
-                pass
+                continue
+        debug = getattr(decision, "debug", {}) or {}
+        if isinstance(debug, dict):
+            recommended = debug.get("recommended_option")
+            if isinstance(recommended, dict):
+                value = recommended.get("size_pct")
+                try:
+                    return None if value is None else float(value)
+                except Exception:
+                    return None
         return None
 
     def _nearest_supported_size(self, value: Optional[float]) -> Optional[int]:
@@ -748,7 +916,7 @@ class AutoClickRuntime:
 
     def _build_click_plan(self, normalized_action: str, raw_action: str) -> AutoClickPlan:
         if normalized_action == "fold":
-            return AutoClickPlan(ACTION_CLICK_FOLD, normalized_action, raw_action, BUTTON_CHECK)
+            return AutoClickPlan(ACTION_CLICK_FOLD, normalized_action, raw_action, BUTTON_FOLD)
         if normalized_action == "check":
             return AutoClickPlan(ACTION_CLICK_CHECK, normalized_action, raw_action, BUTTON_CHECK)
         if normalized_action == "call":
@@ -756,16 +924,50 @@ class AutoClickRuntime:
         if normalized_action == "raise_only":
             return AutoClickPlan(ACTION_CLICK_RAISE_ONLY, normalized_action, raw_action, BUTTON_RAISE)
         if normalized_action == "raise_33":
-            return AutoClickPlan(ACTION_CLICK_SIZE_THEN_RAISE_33, normalized_action, raw_action, BUTTON_33, BUTTON_RAISE, False)
+            return AutoClickPlan(ACTION_CLICK_SIZE_THEN_RAISE_33, normalized_action, raw_action, BUTTON_33, BUTTON_RAISE, True)
         if normalized_action == "raise_50":
-            return AutoClickPlan(ACTION_CLICK_SIZE_THEN_RAISE_50, normalized_action, raw_action, BUTTON_50, BUTTON_RAISE, False)
+            return AutoClickPlan(ACTION_CLICK_SIZE_THEN_RAISE_50, normalized_action, raw_action, BUTTON_50, BUTTON_RAISE, True)
         if normalized_action == "raise_70":
-            return AutoClickPlan(ACTION_CLICK_SIZE_THEN_RAISE_70, normalized_action, raw_action, BUTTON_70, BUTTON_RAISE, False)
+            return AutoClickPlan(ACTION_CLICK_SIZE_THEN_RAISE_70, normalized_action, raw_action, BUTTON_70, BUTTON_RAISE, True)
         if normalized_action in {"raise_98", "iso_raise_98", "threebet_98", "fourbet_98", "fivebet_98"}:
-            return AutoClickPlan(ACTION_CLICK_98_THEN_RAISE, normalized_action, raw_action, BUTTON_98, BUTTON_RAISE, False)
+            return AutoClickPlan(ACTION_CLICK_98_THEN_RAISE, normalized_action, raw_action, BUTTON_98, BUTTON_RAISE, True)
         if normalized_action == "check_fold":
             return AutoClickPlan(ACTION_CLICK_CHECK_FOLD, normalized_action, raw_action, BUTTON_CHECK_FOLD)
         return AutoClickPlan(ACTION_CLICK_RAISE_ONLY, normalized_action, raw_action, BUTTON_RAISE)
+
+    def _decision_key(self, snapshot: AutoClickSnapshot, plan: AutoClickPlan) -> str:
+        decision = snapshot.hero_decision
+        debug = getattr(decision, "debug", {}) or {}
+        fingerprint = None
+        decision_id = None
+        source_frame_id = None
+        if isinstance(debug, dict):
+            fingerprint = debug.get("solver_fingerprint") or debug.get("fingerprint")
+            decision_id = debug.get("decision_id")
+            source_frame_id = debug.get("source_frame_id")
+        for attr_name, storage_name in (("solver_fingerprint", "fingerprint"), ("decision_id", "decision_id"), ("source_frame_id", "source_frame_id")):
+            value = getattr(decision, attr_name, None) if decision is not None else None
+            if value is not None:
+                if storage_name == "fingerprint":
+                    fingerprint = value
+                elif storage_name == "decision_id":
+                    decision_id = value
+                else:
+                    source_frame_id = value
+        size_pct = self._extract_size_pct(decision) if decision is not None else None
+        parts = [
+            f"hand={snapshot.hand_id or ''}",
+            f"started={snapshot.decision_started_at:.6f}",
+            f"street={snapshot.street}",
+            f"plan={plan.plan_name}",
+            f"norm={plan.normalized_action}",
+            f"raw={plan.raw_action}",
+            f"size={'' if size_pct is None else round(float(size_pct), 3)}",
+            f"fp={fingerprint or ''}",
+            f"decision_id={decision_id or ''}",
+            f"source_frame_id={source_frame_id or ''}",
+        ]
+        return "|".join(parts)
 
     def _build_failsafe_plan(self, detections_by_class: Dict[str, List[ButtonDetection]], *, reason: str) -> AutoClickPlan:
         if detections_by_class.get(BUTTON_CHECK):
@@ -796,7 +998,7 @@ class AutoClickRuntime:
         for det in deduped:
             grouped[det.class_name].append(det)
         panel_center = self._panel_center(snapshot.action_panel_bbox)
-        for name, items in grouped.items():
+        for items in grouped.values():
             if len(items) <= 1:
                 continue
             if panel_center is None:
@@ -819,7 +1021,13 @@ class AutoClickRuntime:
             final.extend(kept)
         return final
 
-    def _execute_plan(self, plan: AutoClickPlan, detections_by_class: Dict[str, List[ButtonDetection]], snapshot: AutoClickSnapshot, events: List[AutoClickEvent]) -> bool:
+    def _execute_plan(
+        self,
+        plan: AutoClickPlan,
+        detections_by_class: Dict[str, List[ButtonDetection]],
+        snapshot: AutoClickSnapshot,
+        events: List[AutoClickEvent],
+    ) -> bool:
         self.execution_lock = True
         self.state = STATE_EXECUTING_PLAN
 
@@ -838,7 +1046,14 @@ class AutoClickRuntime:
             return False
 
         if plan.secondary_button:
-            time.sleep(self.rng.randint(self.config.secondary_click_settle_ms_min, self.config.secondary_click_settle_ms_max) / 1000.0)
+            if plan.allow_scroll_between:
+                self._maybe_apply_scroll(events)
+            settle_ms = 0
+            if self.config.secondary_click_settle_ms_max > 0:
+                settle_ms = self.rng.randint(self.config.secondary_click_settle_ms_min, self.config.secondary_click_settle_ms_max)
+            if settle_ms > 0:
+                time.sleep(settle_ms / 1000.0)
+
             secondary = self._select_button(detections_by_class, plan.secondary_button)
             if secondary is None or not self._detection_is_fresh(secondary):
                 secondary = self._retry_find_button(plan.secondary_button, snapshot, events)
@@ -858,12 +1073,13 @@ class AutoClickRuntime:
         self.locked_until_reset = True
         self.execution_lock = False
         self.state = STATE_LOCKED_UNTIL_RESET
+        self._clear_pending_decision()
         self._write_events(events)
         return True
 
     def _resolve_primary_detection(self, plan: AutoClickPlan, detections_by_class: Dict[str, List[ButtonDetection]]) -> Optional[ButtonDetection]:
         if plan.plan_name == ACTION_CLICK_FOLD:
-            for button in (BUTTON_CHECK, BUTTON_FOLD, BUTTON_CHECK_FOLD):
+            for button in (BUTTON_FOLD, BUTTON_CHECK_FOLD):
                 det = self._select_button(detections_by_class, button)
                 if det is not None:
                     return det
@@ -933,9 +1149,10 @@ class AutoClickRuntime:
 
     def _maybe_apply_scroll(self, events: List[AutoClickEvent]) -> None:
         if self.rng.random() > self.config.scroll_enabled_probability:
+            events.append(self._event("scroll_skipped"))
             return
-        direction = 1 if self.rng.random() < self.config.scroll_direction_up_probability else -1
         steps = self.rng.randint(self.config.scroll_steps_min, self.config.scroll_steps_max)
+        direction = 1 if self.rng.random() < self.config.scroll_direction_up_probability else -1
         for _ in range(steps):
             self.mouse.wheel(120 * direction)
             time.sleep(self.rng.randint(self.config.scroll_pause_ms_min, self.config.scroll_pause_ms_max) / 1000.0)
@@ -959,201 +1176,201 @@ class AutoClickRuntime:
             remaining = target_time - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
-        if idle:
-            events.append(self._event("idle_move_applied", target_x=target_x, target_y=target_y))
+        events.append(self._event("mouse_move_finished", target_x=target_x, target_y=target_y, idle=idle))
 
-    def _jittered_point(self, detection: ButtonDetection, snapshot: AutoClickSnapshot) -> Tuple[int, int]:
-        max_jx = min(self.config.target_jitter_px_max, max(self.config.target_jitter_px_min, int(max(4.0, detection.width / 4.0))))
-        max_jy = min(self.config.target_jitter_px_max, max(self.config.target_jitter_px_min, int(max(4.0, detection.height / 4.0))))
-        dx = self.rng.randint(-max_jx, max_jx)
-        dy = self.rng.randint(-max_jy, max_jy)
-        abs_x = int(round(snapshot.monitor_left + detection.center_x + dx))
-        abs_y = int(round(snapshot.monitor_top + detection.center_y + dy))
-        return abs_x, abs_y
-
-    def _panel_center(self, bbox: Optional[Tuple[float, float, float, float]]) -> Optional[Tuple[float, float]]:
-        if bbox is None:
-            return None
-        return ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
-
-    def _distance(self, a: Tuple[float, float], b: Tuple[float, float]) -> float:
-        return math.hypot(a[0] - b[0], a[1] - b[1])
-
-    def _iou(self, box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
-        ax1, ay1, ax2, ay2 = box_a
-        bx1, by1, bx2, by2 = box_b
-        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-        inter = iw * ih
-        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-        denom = area_a + area_b - inter
-        return 0.0 if denom <= 0 else inter / denom
-
-    def _detection_is_fresh(self, detection: ButtonDetection) -> bool:
-        return (time.monotonic() - float(detection.frame_ts)) <= (self.config.button_detection_ttl_ms / 1000.0)
-
-    def _control_point(self, x1: int, y1: int, x2: int, y2: int, *, factor: float) -> Tuple[float, float]:
-        mid_x = x1 + (x2 - x1) * factor
-        mid_y = y1 + (y2 - y1) * factor
-        offset_x = (y2 - y1) * self.rng.uniform(-0.12, 0.12)
-        offset_y = (x1 - x2) * self.rng.uniform(-0.12, 0.12)
-        return mid_x + offset_x, mid_y + offset_y
+    def _control_point(self, start_x: int, start_y: int, target_x: int, target_y: int, *, factor: float) -> Tuple[float, float]:
+        dx = target_x - start_x
+        dy = target_y - start_y
+        length = math.hypot(dx, dy)
+        if length <= 1.0:
+            return float(target_x), float(target_y)
+        nx = -dy / length
+        ny = dx / length
+        spread = max(12.0, min(80.0, length * 0.18))
+        offset = self.rng.uniform(-spread, spread)
+        return (
+            start_x + dx * factor + nx * offset,
+            start_y + dy * factor + ny * offset,
+        )
 
     def _ease_in_out(self, value: float) -> float:
         return 3 * value * value - 2 * value * value * value
 
     def _cubic_bezier(self, p0: float, p1: float, p2: float, p3: float, t: float) -> float:
         inv = 1.0 - t
-        return inv * inv * inv * p0 + 3 * inv * inv * t * p1 + 3 * inv * t * t * p2 + t * t * t * p3
+        return (
+            inv * inv * inv * p0
+            + 3.0 * inv * inv * t * p1
+            + 3.0 * inv * t * t * p2
+            + t * t * t * p3
+        )
 
-    def _write_debug_observation(self, snapshot: AutoClickSnapshot, frame_bgr: Any, raw: Sequence[ButtonDetection], filtered: Dict[str, List[ButtonDetection]], capture_meta: Dict[str, object]) -> None:
-        detector_info = {
-            "button_detector_enabled": bool(self.button_detector is not None),
-            "button_model_path": str(getattr(self.button_detector, "model_path", "")) if self.button_detector is not None else None,
-            "button_model_names": dict(getattr(self.button_detector, "model_names", {}) or {}),
-            "raw_detection_count": len(raw),
-            "filtered_detection_count": sum(len(v) for v in filtered.values()),
-            "frame_source": snapshot.frame_source,
-        }
-        observation = {
-            "ts": time.monotonic(),
-            "state": self.state,
-            "hand_id": snapshot.hand_id,
-            "street": snapshot.street,
-            "active_hero_present": snapshot.active_hero_present,
-            "decision_ready": snapshot.decision_ready,
-            "frame_source": snapshot.frame_source,
-            "monitor": {
-                "name": snapshot.monitor_name,
-                "left": snapshot.monitor_left,
-                "top": snapshot.monitor_top,
-                "width": snapshot.monitor_width,
-                "height": snapshot.monitor_height,
-            },
-            "capture_meta": capture_meta,
-            "raw_detections": [
-                {
-                    "class_name": d.class_name,
-                    "source_class_name": d.source_class_name,
-                    "confidence": float(d.confidence),
-                    "bbox": [float(v) for v in d.bbox],
-                    "center_x": float(d.center_x),
-                    "center_y": float(d.center_y),
-                }
-                for d in raw
-            ],
-            "filtered_detections": {
-                key: [
-                    {
-                        "confidence": float(d.confidence),
-                        "bbox": [float(v) for v in d.bbox],
-                        "center_x": float(d.center_x),
-                        "center_y": float(d.center_y),
-                    }
-                    for d in value
-                ]
-                for key, value in filtered.items() if value
-            },
-            "hero_decision": self._serialize_decision(snapshot.hero_decision),
-        }
-        self._write_json(self.debug_root / "last_observation.json", observation)
-        self._write_json(self.debug_root / "detector_health.json", {"ts": time.monotonic(), **detector_info})
-        if frame_bgr is not None and cv2 is not None:
-            try:
-                cv2.imwrite(str(self.debug_root / "frame_latest.png"), frame_bgr)
-            except Exception:
-                pass
+    def _jittered_point(self, detection: ButtonDetection, snapshot: AutoClickSnapshot) -> Tuple[int, int]:
+        jitter_x = self.rng.randint(self.config.target_jitter_px_min, self.config.target_jitter_px_max)
+        jitter_y = self.rng.randint(self.config.target_jitter_px_min, self.config.target_jitter_px_max)
+        sign_x = -1 if self.rng.random() < 0.5 else 1
+        sign_y = -1 if self.rng.random() < 0.5 else 1
+        x = int(round(detection.center_x + sign_x * jitter_x + snapshot.monitor_left))
+        y = int(round(detection.center_y + sign_y * jitter_y + snapshot.monitor_top))
+        return x, y
 
-    def _write_debug_plan(self, snapshot: AutoClickSnapshot, plan: AutoClickPlan, filtered: Dict[str, List[ButtonDetection]], executed: bool) -> None:
-        payload = {
-            "ts": time.monotonic(),
-            "note": "decision_ready",
-            "state": self.state,
-            "hand_id": snapshot.hand_id,
-            "street": snapshot.street,
-            "plan_name": plan.plan_name,
-            "normalized_action": plan.normalized_action,
-            "raw_action": plan.raw_action,
-            "primary_button": plan.primary_button,
-            "secondary_button": plan.secondary_button,
-            "allow_scroll_between": plan.allow_scroll_between,
-            "is_failsafe": plan.is_failsafe,
-            "visible_buttons": [key for key, value in filtered.items() if value],
-            "frame_source": snapshot.frame_source,
-            "monitor": {
-                "name": snapshot.monitor_name,
-                "left": snapshot.monitor_left,
-                "top": snapshot.monitor_top,
-                "width": snapshot.monitor_width,
-                "height": snapshot.monitor_height,
-            },
-            "result": {"state": self.state, "executed": executed, "locked": self.locked_until_reset},
-        }
-        self._write_json(self.debug_root / "last_plan.json", payload)
+    def _detection_is_fresh(self, detection: ButtonDetection) -> bool:
+        ttl_seconds = self.config.button_detection_ttl_ms / 1000.0
+        return (time.monotonic() - float(detection.frame_ts)) <= ttl_seconds
 
-    def _serialize_decision(self, decision: Optional[HeroDecision]) -> Dict[str, object]:
-        if decision is None:
-            return {}
-        return {
-            "engine_action": getattr(decision, "engine_action", None),
-            "reason": getattr(decision, "reason", None),
-            "size_pct": getattr(decision, "size_pct", None),
-            "amount_to": getattr(decision, "amount_to", None),
-        }
+    def _panel_center(self, bbox: Optional[Tuple[float, float, float, float]]) -> Optional[Tuple[float, float]]:
+        if bbox is None or len(bbox) != 4:
+            return None
+        x1, y1, x2, y2 = bbox
+        return (float(x1 + x2) / 2.0, float(y1 + y2) / 2.0)
 
-    def _write_events(self, events: Sequence[AutoClickEvent]) -> None:
-        for event in events:
-            self._append_jsonl(self.debug_root / "events.jsonl", {"name": event.name, "ts": event.ts, "payload": _json_safe(event.payload)})
+    def _distance(self, point_a: Tuple[float, float], point_b: Tuple[float, float]) -> float:
+        return math.hypot(point_a[0] - point_b[0], point_a[1] - point_b[1])
 
-    def _write_json(self, path: Path, payload: Dict[str, object]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+    def _iou(self, box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        if inter_area <= 0.0:
+            return 0.0
+        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        denom = area_a + area_b - inter_area
+        return 0.0 if denom <= 0.0 else inter_area / denom
 
-    def _append_jsonl(self, path: Path, payload: Dict[str, object]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(_json_safe(payload), ensure_ascii=False) + "\n")
+    def _event(self, name: str, **payload: object) -> AutoClickEvent:
+        return AutoClickEvent(name=name, ts=time.monotonic(), payload={str(k): _json_safe(v) for k, v in payload.items()})
 
     def _result_from_state(self, plan: AutoClickPlan, executed: bool, events: List[AutoClickEvent], *, locked: bool) -> AutoClickResult:
         return AutoClickResult(
             state=self.state,
-            executed=executed,
-            locked=locked,
+            executed=bool(executed),
+            locked=bool(locked),
             plan_name=plan.plan_name,
             normalized_action=plan.normalized_action,
             raw_action=plan.raw_action,
             events=events,
         )
 
-    def _event(self, name: str, **payload: object) -> AutoClickEvent:
-        return AutoClickEvent(name=name, ts=time.monotonic(), payload={str(k): v for k, v in payload.items()})
+    def _append_jsonl(self, path: Path, payload: Dict[str, object]) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(_json_safe(payload), ensure_ascii=False) + "\n")
+        except Exception:
+            LOGGER.exception("%s failed to append jsonl to %s", self.config.log_prefix, path)
 
+    def _write_events(self, events: Sequence[AutoClickEvent]) -> None:
+        if not events:
+            return
+        path = self.debug_root / "events.jsonl"
+        for event in events:
+            self._append_jsonl(
+                path,
+                {
+                    "name": event.name,
+                    "ts": event.ts,
+                    "payload": event.payload,
+                },
+            )
 
-def build_default_button_detector(config: Optional[AutoClickConfig] = None) -> Optional[YoloButtonDetector]:
-    cfg = config or AutoClickConfig()
-    try:
-        return YoloButtonDetector(cfg.button_model_path)
-    except Exception:
-        LOGGER.exception("Failed to build YOLO button detector")
-        return None
+    def _write_debug_observation(
+        self,
+        snapshot: AutoClickSnapshot,
+        frame_used: Any,
+        raw_detections: Sequence[ButtonDetection],
+        filtered: Dict[str, List[ButtonDetection]],
+        capture_meta: Dict[str, object],
+    ) -> None:
+        timestamp = int(time.time() * 1000)
+        self._append_jsonl(
+            self.debug_root / "observations.jsonl",
+            {
+                "ts": timestamp,
+                "hand_id": snapshot.hand_id,
+                "street": snapshot.street,
+                "decision_ready": snapshot.decision_ready,
+                "critical_error_flag": snapshot.critical_error_flag,
+                "capture_meta": capture_meta,
+                "raw_detections": [self._serialize_detection(det) for det in raw_detections],
+                "filtered": {name: [self._serialize_detection(det) for det in items] for name, items in filtered.items() if items},
+            },
+        )
+        if frame_used is not None and cv2 is not None:
+            try:
+                img_path = self.debug_root / "frames" / f"frame_{timestamp}.jpg"
+                img_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(img_path), frame_used)
+            except Exception:
+                LOGGER.exception("%s failed to save debug frame", self.config.log_prefix)
 
+    def _write_debug_plan(
+        self,
+        snapshot: AutoClickSnapshot,
+        plan: AutoClickPlan,
+        detections_by_class: Dict[str, List[ButtonDetection]],
+        executed: bool,
+    ) -> None:
+        self._append_jsonl(
+            self.debug_root / "plans.jsonl",
+            {
+                "ts": time.monotonic(),
+                "hand_id": snapshot.hand_id,
+                "street": snapshot.street,
+                "decision_started_at": snapshot.decision_started_at,
+                "plan": {
+                    "plan_name": plan.plan_name,
+                    "normalized_action": plan.normalized_action,
+                    "raw_action": plan.raw_action,
+                    "primary_button": plan.primary_button,
+                    "secondary_button": plan.secondary_button,
+                    "allow_scroll_between": plan.allow_scroll_between,
+                    "is_failsafe": plan.is_failsafe,
+                },
+                "executed": bool(executed),
+                "detections": {name: [self._serialize_detection(det) for det in items] for name, items in detections_by_class.items() if items},
+            },
+        )
 
-def create_default_auto_click_runtime(*, with_button_detector: bool = True) -> AutoClickRuntime:
-    config = AutoClickConfig()
-    detector = build_default_button_detector(config) if with_button_detector else None
-    return AutoClickRuntime(config=config, button_detector=detector)
+    def _serialize_detection(self, det: ButtonDetection) -> Dict[str, object]:
+        return {
+            "class_name": det.class_name,
+            "confidence": float(det.confidence),
+            "bbox": [float(v) for v in det.bbox],
+            "center_x": float(det.center_x),
+            "center_y": float(det.center_y),
+            "frame_ts": float(det.frame_ts),
+            "source_class_name": det.source_class_name,
+        }
 
 
 __all__ = [
+    "ACTION_CLICK_98_THEN_RAISE",
+    "ACTION_CLICK_CALL",
+    "ACTION_CLICK_CHECK",
+    "ACTION_CLICK_CHECK_FOLD",
+    "ACTION_CLICK_FOLD",
+    "ACTION_CLICK_RAISE_ONLY",
+    "ACTION_CLICK_SIZE_THEN_RAISE_33",
+    "ACTION_CLICK_SIZE_THEN_RAISE_50",
+    "ACTION_CLICK_SIZE_THEN_RAISE_70",
     "AutoClickConfig",
+    "AutoClickEvent",
+    "AutoClickPlan",
+    "AutoClickResult",
     "AutoClickRuntime",
     "AutoClickSnapshot",
-    "AutoClickResult",
-    "AutoClickPlan",
-    "AutoClickEvent",
     "ButtonDetection",
+    "NoopMouseBackend",
+    "WindowsMouseBackend",
+    "YoloButtonDetector",
     "build_default_button_detector",
-    "create_default_auto_click_runtime",
+    "canonicalize_button_class_name",
+    "resolve_model_path",
 ]
