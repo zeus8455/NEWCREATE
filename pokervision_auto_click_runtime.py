@@ -426,6 +426,8 @@ class AutoClickRuntime:
         self.last_normalized_action: Optional[str] = None
         self.last_raw_action: Optional[str] = None
         self.last_executed_decision_key: Optional[str] = None
+        self.last_executed_spot_key: Optional[str] = None
+        self.locked_spot_key: Optional[str] = None
 
         self.pending_decision_key: Optional[str] = None
         self.pending_decision_since: Optional[float] = None
@@ -594,31 +596,18 @@ class AutoClickRuntime:
             self.state = STATE_FAILSAFE_EXECUTION
             plan = self._build_failsafe_plan(filtered, reason=snapshot.critical_error_text or "critical_error")
             events.append(self._event("critical_error_failsafe", reason=plan.raw_action))
-            executed = self._execute_plan(plan, filtered, snapshot, events)
+            executed = self._execute_plan(plan, filtered, snapshot, events, spot_key=self._spot_key(snapshot))
             self._write_debug_plan(snapshot, plan, filtered, executed)
             return self._result_from_state(plan, executed, events, locked=executed)
         else:
             self.error_started_at = None
-
-        if self.locked_until_reset:
-            self.state = STATE_LOCKED_UNTIL_RESET
-            events.append(self._event("execution_locked", hand_id=snapshot.hand_id or "", plan_name=self.last_plan_name or ""))
-            return AutoClickResult(
-                state=self.state,
-                executed=False,
-                locked=True,
-                plan_name=self.last_plan_name,
-                normalized_action=self.last_normalized_action,
-                raw_action=self.last_raw_action,
-                events=events,
-            )
 
         timeout_seconds = self._resolve_timeout(snapshot)
         if now - self.wait_started_at >= timeout_seconds and not snapshot.decision_ready:
             self.state = STATE_FAILSAFE_EXECUTION
             plan = self._build_failsafe_plan(filtered, reason="decision_timeout")
             events.append(self._event("decision_timeout", timeout_seconds=timeout_seconds))
-            executed = self._execute_plan(plan, filtered, snapshot, events)
+            executed = self._execute_plan(plan, filtered, snapshot, events, spot_key=self._spot_key(snapshot))
             self._write_debug_plan(snapshot, plan, filtered, executed)
             return self._result_from_state(plan, executed, events, locked=executed)
 
@@ -631,13 +620,14 @@ class AutoClickRuntime:
         raw_action = self._resolve_raw_action(snapshot.hero_decision)
         normalized = self._normalize_action(snapshot)
         plan = self._build_click_plan(normalized, raw_action)
-        decision_key = self._decision_key(snapshot, plan)
+        spot_key = self._spot_key(snapshot)
+        decision_key = self._decision_key(snapshot, plan, spot_key=spot_key)
 
         self.last_plan_name = plan.plan_name
         self.last_normalized_action = plan.normalized_action
         self.last_raw_action = plan.raw_action
 
-        events.append(self._event("decision_received", raw_action=raw_action, normalized_action=normalized, street=snapshot.street))
+        events.append(self._event("decision_received", raw_action=raw_action, normalized_action=normalized, street=snapshot.street, spot_key=spot_key))
         events.append(
             self._event(
                 "click_plan_built",
@@ -645,11 +635,54 @@ class AutoClickRuntime:
                 primary_button=plan.primary_button,
                 secondary_button=plan.secondary_button or "",
                 decision_key=decision_key,
+                spot_key=spot_key,
             )
         )
 
+        if self.locked_until_reset:
+            if spot_key == self.locked_spot_key:
+                self.state = STATE_LOCKED_UNTIL_RESET
+                events.append(
+                    self._event(
+                        "execution_locked_same_spot",
+                        hand_id=snapshot.hand_id or "",
+                        plan_name=self.last_plan_name or "",
+                        spot_key=spot_key,
+                    )
+                )
+                return AutoClickResult(
+                    state=self.state,
+                    executed=False,
+                    locked=True,
+                    plan_name=self.last_plan_name,
+                    normalized_action=self.last_normalized_action,
+                    raw_action=self.last_raw_action,
+                    events=events,
+                )
+            events.append(
+                self._event(
+                    "execution_lock_released_on_spot_change",
+                    previous_spot_key=self.locked_spot_key or "",
+                    new_spot_key=spot_key,
+                )
+            )
+            self.locked_until_reset = False
+            self.locked_spot_key = None
+
+        if spot_key == self.last_executed_spot_key:
+            events.append(self._event("duplicate_spot_ignored", spot_key=spot_key))
+            return AutoClickResult(
+                state=self.state,
+                executed=False,
+                locked=False,
+                plan_name=plan.plan_name,
+                normalized_action=plan.normalized_action,
+                raw_action=plan.raw_action,
+                events=events,
+            )
+
         if decision_key == self.last_executed_decision_key:
-            events.append(self._event("duplicate_decision_ignored", decision_key=decision_key))
+            events.append(self._event("duplicate_decision_ignored", decision_key=decision_key, spot_key=spot_key))
             return AutoClickResult(
                 state=self.state,
                 executed=False,
@@ -701,17 +734,17 @@ class AutoClickRuntime:
                 events=events,
             )
 
-        executed = self._execute_plan(plan, filtered, snapshot, events)
+        executed = self._execute_plan(plan, filtered, snapshot, events, spot_key=spot_key)
         self._write_debug_plan(snapshot, plan, filtered, executed)
         if executed:
             self.last_executed_decision_key = decision_key
+            self.last_executed_spot_key = spot_key
         return self._result_from_state(plan, executed, events, locked=executed)
 
     def _cycle_key(self, snapshot: AutoClickSnapshot) -> str:
-        base = f"started:{float(snapshot.decision_started_at):.6f}"
         if snapshot.hand_id:
-            return f"hand:{snapshot.hand_id}:{base}"
-        return base
+            return f"hand:{snapshot.hand_id}"
+        return f"started:{float(snapshot.decision_started_at):.6f}"
 
     def _should_reset_cycle(self, snapshot: AutoClickSnapshot, cycle_key: str) -> bool:
         if self.last_cycle_key is None:
@@ -738,6 +771,8 @@ class AutoClickRuntime:
         self.last_raw_action = None
         self.last_normalized_action = None
         self.last_executed_decision_key = None
+        self.last_executed_spot_key = None
+        self.locked_spot_key = None
         self._clear_pending_decision()
         self.state = STATE_ACTIVE_HERO_WAITING_DECISION if snapshot.active_hero_present else STATE_IDLE
         return [self._event("cycle_reset", hand_id=snapshot.hand_id or "", state=self.state, cycle_key=cycle_key)]
@@ -935,7 +970,44 @@ class AutoClickRuntime:
             return AutoClickPlan(ACTION_CLICK_CHECK_FOLD, normalized_action, raw_action, BUTTON_CHECK_FOLD)
         return AutoClickPlan(ACTION_CLICK_RAISE_ONLY, normalized_action, raw_action, BUTTON_RAISE)
 
-    def _decision_key(self, snapshot: AutoClickSnapshot, plan: AutoClickPlan) -> str:
+    def _spot_key(self, snapshot: AutoClickSnapshot) -> str:
+        decision = snapshot.hero_decision
+        debug = getattr(decision, "debug", {}) or {}
+        fingerprint = None
+        decision_id = None
+        source_frame_id = None
+        if isinstance(debug, dict):
+            fingerprint = debug.get("solver_fingerprint") or debug.get("fingerprint")
+            decision_id = debug.get("decision_id")
+            source_frame_id = debug.get("source_frame_id")
+        for attr_name, storage_name in (("solver_fingerprint", "fingerprint"), ("decision_id", "decision_id"), ("source_frame_id", "source_frame_id")):
+            value = getattr(decision, attr_name, None) if decision is not None else None
+            if value is not None:
+                if storage_name == "fingerprint":
+                    fingerprint = value
+                elif storage_name == "decision_id":
+                    decision_id = value
+                else:
+                    source_frame_id = value
+
+        meta = snapshot.solver_context_meta or {}
+        stable_parts = [
+            f"hand={snapshot.hand_id or ''}",
+            f"street={snapshot.street}",
+            f"fp={fingerprint or ''}",
+            f"decision_id={decision_id or ''}",
+            f"source_frame_id={source_frame_id or ''}",
+            f"node_type={meta.get('node_type') or ''}",
+            f"opener_pos={meta.get('opener_pos') or ''}",
+            f"three_bettor_pos={meta.get('three_bettor_pos') or ''}",
+            f"four_bettor_pos={meta.get('four_bettor_pos') or ''}",
+            f"limpers={meta.get('limpers') if meta.get('limpers') is not None else ''}",
+            f"callers={meta.get('callers') if meta.get('callers') is not None else ''}",
+            f"pot={'' if snapshot.total_pot_bb is None else round(float(snapshot.total_pot_bb), 3)}",
+        ]
+        return "|".join(stable_parts)
+
+    def _decision_key(self, snapshot: AutoClickSnapshot, plan: AutoClickPlan, *, spot_key: Optional[str] = None) -> str:
         decision = snapshot.hero_decision
         debug = getattr(decision, "debug", {}) or {}
         fingerprint = None
@@ -955,10 +1027,9 @@ class AutoClickRuntime:
                 else:
                     source_frame_id = value
         size_pct = self._extract_size_pct(decision) if decision is not None else None
+        resolved_spot_key = spot_key or self._spot_key(snapshot)
         parts = [
-            f"hand={snapshot.hand_id or ''}",
-            f"started={snapshot.decision_started_at:.6f}",
-            f"street={snapshot.street}",
+            resolved_spot_key,
             f"plan={plan.plan_name}",
             f"norm={plan.normalized_action}",
             f"raw={plan.raw_action}",
@@ -1027,6 +1098,8 @@ class AutoClickRuntime:
         detections_by_class: Dict[str, List[ButtonDetection]],
         snapshot: AutoClickSnapshot,
         events: List[AutoClickEvent],
+        *,
+        spot_key: Optional[str] = None,
     ) -> bool:
         self.execution_lock = True
         self.state = STATE_EXECUTING_PLAN
@@ -1071,6 +1144,7 @@ class AutoClickRuntime:
         cooldown = self.rng.uniform(self.config.post_click_cooldown_sec_min, self.config.post_click_cooldown_sec_max)
         self.post_click_until = time.monotonic() + cooldown
         self.locked_until_reset = True
+        self.locked_spot_key = spot_key or self._spot_key(snapshot)
         self.execution_lock = False
         self.state = STATE_LOCKED_UNTIL_RESET
         self._clear_pending_decision()
