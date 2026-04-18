@@ -446,6 +446,181 @@ def _mark_solver_reuse_hit(hand: HandState) -> None:
     hand.processing_summary["solver_reuse_hits"] += 1
 
 
+def _failure_reason_for_stage(stage: str) -> str:
+    reasons = {
+        "structure": "ActiveHero найден, но структура стола не прошла валидацию, поэтому новый hand/render state не был построен.",
+        "street": "ActiveHero найден, но улица не была определена корректно, поэтому pipeline остановился до сборки нового hand/render state.",
+        "hero_cards": "ActiveHero найден, но HERO cards не прошли валидацию, поэтому новая раздача не дошла до hand/render state.",
+        "board_marker": "ActiveHero найден, но маркер улицы на борде не был найден, поэтому pipeline не смог построить board state и render state.",
+        "board_cards": "ActiveHero найден, но board cards не прошли валидацию, поэтому pipeline остановился до сборки нового render state.",
+    }
+    return reasons.get(stage, "ActiveHero найден, но текущий кадр завершился ошибкой до построения нового hand/render state.")
+
+
+def _build_failed_frame_payload(
+    analysis: FrameAnalysis,
+    hand: Optional[HandState],
+    *,
+    stage: str,
+    message: str,
+    artifacts: Any,
+) -> dict[str, Any]:
+    return {
+        "frame_id": analysis.frame_id,
+        "timestamp": analysis.timestamp,
+        "active_hero_found": bool(analysis.active_hero_found),
+        "error_stage": stage,
+        "error_message": message,
+        "failure_reason": _failure_reason_for_stage(stage),
+        "hand_id": hand.hand_id if hand is not None else None,
+        "hand_status": hand.status if hand is not None else None,
+        "previous_render_hand_id": hand.hand_id if hand is not None else None,
+        "street": analysis.street,
+        "player_count": analysis.player_count,
+        "table_format": analysis.table_format,
+        "hero_position": analysis.hero_position,
+        "hero_cards": list(analysis.hero_cards),
+        "board_cards": list(analysis.board_cards),
+        "occupied_positions": list(analysis.occupied_positions),
+        "analysis_errors": list(analysis.errors),
+        "analysis_warnings": list(analysis.warnings),
+        "validation": _safe_jsonable(analysis.validation),
+        "table_amount_state": _safe_jsonable(analysis.table_amount_state),
+        "amount_normalization": _safe_jsonable(analysis.amount_normalization),
+        "artifacts": artifacts.to_dict() if hasattr(artifacts, "to_dict") else _safe_jsonable(artifacts),
+        "raw_frame_path": getattr(artifacts, "raw_frame_path", None),
+        "overlay_frame_path": getattr(artifacts, "overlay_frame_path", None),
+        "hero_crop_path": getattr(artifacts, "hero_crop_path", None),
+        "board_crop_path": getattr(artifacts, "board_crop_path", None),
+        "debug_paths": list(getattr(artifacts, "debug_paths", []) or []),
+    }
+
+
+def _build_ui_error_state(
+    analysis: FrameAnalysis,
+    hand: Optional[HandState],
+    *,
+    stage: str,
+    message: str,
+    failure_paths: dict[str, str],
+) -> dict[str, Any]:
+    street = str(analysis.street or ((hand.street_state or {}).get("current_street") if hand else "preflop") or "preflop")
+    player_count = int(analysis.player_count or (hand.player_count if hand is not None else 0) or 0)
+    table_format = str(analysis.table_format or (hand.table_format if hand is not None else "") or "")
+    hero_position = str(analysis.hero_position or (hand.hero_position if hand is not None else "") or "")
+    occupied_positions = list(analysis.occupied_positions or (hand.occupied_positions if hand is not None else []) or [])
+    players = {}
+    if hand is not None and isinstance(getattr(hand, "player_states", None), dict):
+        for position, payload in hand.player_states.items():
+            if not isinstance(payload, dict):
+                continue
+            players[position] = {
+                "position": position,
+                "occupied": position in occupied_positions if occupied_positions else True,
+                "is_hero": position == hero_position,
+                "is_button": position == "BTN",
+                "is_fold": bool(payload.get("is_fold", False)),
+                "is_all_in": bool(payload.get("is_all_in", False)),
+                "is_active": bool(payload.get("is_active", not bool(payload.get("is_fold", False)))),
+                "stack_bb": payload.get("stack_bb"),
+                "stack_text_raw": payload.get("stack_text_raw", ""),
+                "state_warnings": list(payload.get("warnings", [])),
+                "cards_visible": False,
+                "show_card_backs": False,
+                "current_bet_bb": 0.0,
+                "current_bet_raw": "",
+                "last_action": None,
+            }
+
+    failure_reason = _failure_reason_for_stage(stage)
+    ui_error = {
+        "error_stage": stage,
+        "error_message": message,
+        "failure_reason": failure_reason,
+        "failed_frame_json_path": failure_paths.get("failed_frame_json_path"),
+        "ui_error_state_path": failure_paths.get("ui_error_state_path"),
+    }
+
+    return {
+        "hand_id": hand.hand_id if hand is not None else f"failed_{analysis.frame_id}",
+        "player_count": player_count,
+        "table_format": table_format,
+        "street": street,
+        "hero_position": hero_position,
+        "hero_cards": list(analysis.hero_cards),
+        "board_cards": list(analysis.board_cards),
+        "players": players,
+        "status": "error",
+        "warnings": [f"Frame failed at {stage}", failure_reason],
+        "freshness": "error",
+        "source_frame_id": analysis.frame_id,
+        "source_timestamp": analysis.timestamp,
+        "updated_at": analysis.timestamp,
+        "seat_order": occupied_positions,
+        "table_amount_state": _safe_jsonable(analysis.table_amount_state),
+        "amount_normalization": _safe_jsonable(analysis.amount_normalization),
+        "amount_state": {},
+        "action_annotations": {"actions_log": [], "last_actions_by_position": {}},
+        "reconstructed_preflop": {},
+        "reconstructed_postflop": {},
+        "advisor_input": {},
+        "solver_input": {},
+        "solver_output": {},
+        "engine_result": {"status": "frame_failed_before_render_build"},
+        "solver_context": {},
+        "solver_status": "frame_failed_before_render_build",
+        "solver_warnings": [],
+        "solver_errors": [message],
+        "hero_decision_debug": {
+            "status": "error",
+            "error_stage": stage,
+            "error_message": message,
+            "failure_reason": failure_reason,
+        },
+        "solver_fingerprint": None,
+        "solver_result_reused": False,
+        "solver_reuse_reason": None,
+        "processing_summary": {
+            "failed_frame": True,
+            "error_stage": stage,
+            "error_message": message,
+        },
+        "solver_run_frame_id": None,
+        "solver_run_timestamp": None,
+        "recommended_action": "ERROR",
+        "recommended_amount_to": None,
+        "recommended_size_pct": None,
+        "node_type": stage,
+        "engine_status": "frame_failed_before_render_build",
+        "analysis_panel": {
+            "error_stage": stage,
+            "error_message": message,
+            "failure_reason": failure_reason,
+            "failed_frame_json_path": failure_paths.get("failed_frame_json_path"),
+            "ui_error_state_path": failure_paths.get("ui_error_state_path"),
+        },
+        "ui_error": ui_error,
+    }
+
+
+def _save_failed_frame_and_build_ui_error(
+    storage: StorageManager,
+    analysis: FrameAnalysis,
+    hand: Optional[HandState],
+    *,
+    stage: str,
+    message: str,
+    artifacts: Any,
+) -> dict[str, Any]:
+    failed_frame_payload = _build_failed_frame_payload(analysis, hand, stage=stage, message=message, artifacts=artifacts)
+    ui_error_state = _build_ui_error_state(analysis, hand, stage=stage, message=message, failure_paths={})
+    failure_paths = storage.save_failure_state(stage, analysis.frame_id, failed_frame_payload, ui_error_state)
+    ui_error_state["ui_error"].update(failure_paths)
+    ui_error_state["analysis_panel"].update(failure_paths)
+    ui_error_state["processing_summary"].update(failure_paths)
+    return ui_error_state
+
+
 def _apply_reused_solver_payload(analysis: FrameAnalysis, hand: HandState, preview: Any) -> None:
     reuse_reason = "same_solver_input_fingerprint"
     solver_context = _safe_jsonable((preview or {}).get("solver_context", {})) if isinstance(preview, dict) else {}
@@ -530,7 +705,7 @@ class PokerVisionPipeline:
         )
         if not structure_val.ok:
             analysis.errors.extend(structure_val.errors)
-            self.storage.save_failure_artifacts(
+            artifacts = self.storage.save_failure_artifacts(
                 "structure",
                 frame.frame_id,
                 frame.image,
@@ -544,7 +719,15 @@ class PokerVisionPipeline:
                 frame.frame_id,
                 True,
             )
-            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
+            error_render_state = _save_failed_frame_and_build_ui_error(
+                self.storage,
+                analysis,
+                self.hand_manager.active_hand,
+                stage="structure",
+                message="; ".join(structure_val.errors),
+                artifacts=artifacts,
+            )
+            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
 
         cleaned = structure_val.meta["cleaned"]
         btn = structure_val.meta["btn"][0]
@@ -558,7 +741,7 @@ class PokerVisionPipeline:
         street_val = determine_street(cleaned)
         if not street_val.ok:
             analysis.errors.extend(street_val.errors)
-            self.storage.save_failure_artifacts(
+            artifacts = self.storage.save_failure_artifacts(
                 "street",
                 frame.frame_id,
                 frame.image,
@@ -572,7 +755,15 @@ class PokerVisionPipeline:
                 frame.frame_id,
                 True,
             )
-            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
+            error_render_state = _save_failed_frame_and_build_ui_error(
+                self.storage,
+                analysis,
+                self.hand_manager.active_hand,
+                stage="street",
+                message="; ".join(street_val.errors),
+                artifacts=artifacts,
+            )
+            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
 
         street = str(street_val.meta["street"])
         analysis.street = street
@@ -672,7 +863,7 @@ class PokerVisionPipeline:
             analysis.hero_cards = hero_val.meta["cards"]
         else:
             analysis.errors.extend(hero_val.errors)
-            self.storage.save_failure_artifacts(
+            artifacts = self.storage.save_failure_artifacts(
                 "hero_cards",
                 frame.frame_id,
                 frame.image,
@@ -692,7 +883,15 @@ class PokerVisionPipeline:
                 frame.frame_id,
                 True,
             )
-            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
+            error_render_state = _save_failed_frame_and_build_ui_error(
+                self.storage,
+                analysis,
+                self.hand_manager.active_hand,
+                stage="hero_cards",
+                message="; ".join(hero_val.errors),
+                artifacts=artifacts,
+            )
+            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
 
         board_crop = None
         board_overlay = None
@@ -701,7 +900,7 @@ class PokerVisionPipeline:
             marker = next((d for d in cleaned if d.label == marker_label), None)
             if marker is None:
                 analysis.errors.append(f"Missing {marker_label} marker")
-                self.storage.save_failure_artifacts(
+                artifacts = self.storage.save_failure_artifacts(
                     "board_marker",
                     frame.frame_id,
                     frame.image,
@@ -721,7 +920,15 @@ class PokerVisionPipeline:
                     frame.frame_id,
                     True,
                 )
-                return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
+                error_render_state = _save_failed_frame_and_build_ui_error(
+                    self.storage,
+                    analysis,
+                    self.hand_manager.active_hand,
+                    stage="board_marker",
+                    message=f"Missing {marker_label} marker",
+                    artifacts=artifacts,
+                )
+                return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
 
             board_bbox = marker.bbox
             board_crop, board_origin = build_board_crop(frame.image, board_bbox, self.settings)
@@ -749,7 +956,7 @@ class PokerVisionPipeline:
                         retry_ok = True
                 if not retry_ok:
                     analysis.errors.extend(board_val.errors)
-                    self.storage.save_failure_artifacts(
+                    artifacts = self.storage.save_failure_artifacts(
                         "board_cards",
                         frame.frame_id,
                         frame.image,
@@ -771,7 +978,15 @@ class PokerVisionPipeline:
                         frame.frame_id,
                         True,
                     )
-                    return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=None)
+                    error_render_state = _save_failed_frame_and_build_ui_error(
+                        self.storage,
+                        analysis,
+                        self.hand_manager.active_hand,
+                        stage="board_cards",
+                        message="; ".join(board_val.errors),
+                        artifacts=artifacts,
+                    )
+                    return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
 
         # CRITICAL INVARIANT:
         # Preflop/postflop action reconstruction may reuse state from the previous

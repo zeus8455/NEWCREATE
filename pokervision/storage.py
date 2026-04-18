@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -50,11 +50,15 @@ class StorageManager:
         cv2.imwrite(str(path), image)
         return str(path)
 
+    def save_json(self, path: Path, payload: dict[str, Any]) -> str:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return str(path)
+
     def save_render_state(self, hand_id: str, render_state: dict) -> str:
         path = self.hand_dir(hand_id) / "render" / "last_render_state.json"
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(render_state, f, ensure_ascii=False, indent=2)
-        return str(path)
+        return self.save_json(path, render_state)
 
     def save_pipeline_artifacts(
         self,
@@ -148,3 +152,28 @@ class StorageManager:
             for idx, image in enumerate(debug_images):
                 artifacts.debug_paths.append(self.save_image(out_dir / f"{frame_id}_debug_{idx}.png", image))
         return artifacts
+
+    def save_failure_state(
+        self,
+        stage: str,
+        frame_id: str,
+        failed_frame_payload: dict[str, Any],
+        ui_error_state_payload: Optional[dict[str, Any]] = None,
+    ) -> dict[str, str]:
+        out_dir = self.failure_dir(stage, frame_id)
+        failed_frame_path = str(out_dir / "failed_frame.json")
+        ui_error_state_path = str(out_dir / "ui_error_state.json")
+
+        failed_frame_payload = dict(failed_frame_payload or {})
+        failed_frame_payload["failed_frame_json_path"] = failed_frame_path
+        failed_frame_payload["ui_error_state_path"] = ui_error_state_path if ui_error_state_payload is not None else None
+        self.save_json(Path(failed_frame_path), failed_frame_payload)
+
+        paths = {"failed_frame_json_path": failed_frame_path}
+        if ui_error_state_payload is not None:
+            ui_error_state_payload = dict(ui_error_state_payload or {})
+            ui_error_state_payload["failed_frame_json_path"] = failed_frame_path
+            ui_error_state_payload["ui_error_state_path"] = ui_error_state_path
+            self.save_json(Path(ui_error_state_path), ui_error_state_payload)
+            paths["ui_error_state_path"] = ui_error_state_path
+        return paths

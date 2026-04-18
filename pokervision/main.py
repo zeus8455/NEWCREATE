@@ -90,13 +90,23 @@ def run_with_ui(args) -> int:  # pragma: no cover
             result = pipeline.process_frame(frame)
             if result.render_state:
                 shared.update_render_state(result.render_state)
-            shared.update_status(
-                {
-                    "frame_id": result.analysis.frame_id,
-                    "street": result.analysis.street,
-                    "errors": result.analysis.errors,
-                }
-            )
+            status_payload = {
+                "frame_id": result.analysis.frame_id,
+                "street": result.analysis.street,
+                "errors": result.analysis.errors,
+            }
+            if isinstance(result.render_state, dict) and str(result.render_state.get("status") or "") == "error":
+                ui_error = result.render_state.get("ui_error", {}) if isinstance(result.render_state.get("ui_error", {}), dict) else {}
+                status_payload.update(
+                    {
+                        "error_stage": ui_error.get("error_stage"),
+                        "error_message": ui_error.get("error_message"),
+                        "failure_reason": ui_error.get("failure_reason"),
+                        "failed_frame_json_path": ui_error.get("failed_frame_json_path"),
+                        "ui_error_state_path": ui_error.get("ui_error_state_path"),
+                    }
+                )
+            shared.update_status(status_payload)
             time.sleep(settings.frame_debounce_ms / 1000.0)
 
     thread = threading.Thread(target=worker, daemon=True)
