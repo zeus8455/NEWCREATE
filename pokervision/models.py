@@ -972,6 +972,7 @@ class PipelineArtifacts:
     table_amount_crop_paths: Dict[str, str] = field(default_factory=dict)
     table_amount_overlay_paths: Dict[str, str] = field(default_factory=dict)
     debug_paths: List[str] = field(default_factory=list)
+    extra_paths: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -986,6 +987,7 @@ class PipelineArtifacts:
             "table_amount_crop_paths": dict(self.table_amount_crop_paths),
             "table_amount_overlay_paths": dict(self.table_amount_overlay_paths),
             "debug_paths": list(self.debug_paths),
+            "extra_paths": dict(self.extra_paths),
         }
 
 

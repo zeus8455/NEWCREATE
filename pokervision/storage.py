@@ -122,6 +122,7 @@ class StorageManager:
         table_amount_crops: Optional[dict[str, np.ndarray]] = None,
         table_amount_overlays: Optional[dict[str, np.ndarray]] = None,
         debug_images: Optional[list[np.ndarray]] = None,
+        extra_images: Optional[dict[str, np.ndarray]] = None,
     ) -> PipelineArtifacts:
         out_dir = self.failure_dir(stage, frame_id)
         artifacts = PipelineArtifacts()
@@ -148,6 +149,10 @@ class StorageManager:
         if table_amount_overlays:
             for region_id, image in table_amount_overlays.items():
                 artifacts.table_amount_overlay_paths[region_id] = self.save_image(out_dir / f"{frame_id}_{region_id}_overlay.png", image)
+        if extra_images:
+            for name, image in extra_images.items():
+                safe_name = str(name).strip().replace(" ", "_") or "extra"
+                artifacts.extra_paths[safe_name] = self.save_image(out_dir / f"{frame_id}_{safe_name}.png", image)
         if debug_images and self.settings.save_debug_on_error:
             for idx, image in enumerate(debug_images):
                 artifacts.debug_paths.append(self.save_image(out_dir / f"{frame_id}_debug_{idx}.png", image))

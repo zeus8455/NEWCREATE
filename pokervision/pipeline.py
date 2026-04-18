@@ -71,6 +71,23 @@ def _localize(global_detections: list[Detection], origin: tuple[int, int]) -> li
     return localized
 
 
+def _expand_bbox_for_retry(
+    bbox: BBox,
+    image: np.ndarray,
+    *,
+    pad_x: float,
+    pad_top: float,
+    pad_bottom: float,
+) -> BBox:
+    height, width = image.shape[:2]
+    return BBox(
+        x1=max(0.0, float(bbox.x1) - float(pad_x)),
+        y1=max(0.0, float(bbox.y1) - float(pad_top)),
+        x2=min(float(width), float(bbox.x2) + float(pad_x)),
+        y2=min(float(height), float(bbox.y2) + float(pad_bottom)),
+    )
+
+
 def _safe_jsonable(value: Any, *, depth: int = 0) -> Any:
     if depth > 5:
         return repr(value)
@@ -465,6 +482,7 @@ def _build_failed_frame_payload(
     message: str,
     artifacts: Any,
 ) -> dict[str, Any]:
+    previous_render = hand.render_state_snapshot if hand is not None and isinstance(hand.render_state_snapshot, dict) else {}
     return {
         "frame_id": analysis.frame_id,
         "timestamp": analysis.timestamp,
@@ -475,6 +493,10 @@ def _build_failed_frame_payload(
         "hand_id": hand.hand_id if hand is not None else None,
         "hand_status": hand.status if hand is not None else None,
         "previous_render_hand_id": hand.hand_id if hand is not None else None,
+        "previous_render_source_frame_id": previous_render.get("source_frame_id"),
+        "previous_render_updated_at": previous_render.get("updated_at"),
+        "previous_render_street": previous_render.get("street"),
+        "previous_render_hero_cards": list(previous_render.get("hero_cards", []) or []),
         "street": analysis.street,
         "player_count": analysis.player_count,
         "table_format": analysis.table_format,
@@ -491,8 +513,11 @@ def _build_failed_frame_payload(
         "raw_frame_path": getattr(artifacts, "raw_frame_path", None),
         "overlay_frame_path": getattr(artifacts, "overlay_frame_path", None),
         "hero_crop_path": getattr(artifacts, "hero_crop_path", None),
+        "hero_overlay_path": getattr(artifacts, "hero_overlay_path", None),
         "board_crop_path": getattr(artifacts, "board_crop_path", None),
+        "board_overlay_path": getattr(artifacts, "board_overlay_path", None),
         "debug_paths": list(getattr(artifacts, "debug_paths", []) or []),
+        "extra_paths": dict(getattr(artifacts, "extra_paths", {}) or {}),
     }
 
 
@@ -503,6 +528,7 @@ def _build_ui_error_state(
     stage: str,
     message: str,
     failure_paths: dict[str, str],
+    artifacts: Any | None = None,
 ) -> dict[str, Any]:
     street = str(analysis.street or ((hand.street_state or {}).get("current_street") if hand else "preflop") or "preflop")
     player_count = int(analysis.player_count or (hand.player_count if hand is not None else 0) or 0)
@@ -533,12 +559,22 @@ def _build_ui_error_state(
             }
 
     failure_reason = _failure_reason_for_stage(stage)
+    artifact_paths = {
+        "raw_frame_path": getattr(artifacts, "raw_frame_path", None),
+        "overlay_frame_path": getattr(artifacts, "overlay_frame_path", None),
+        "hero_crop_path": getattr(artifacts, "hero_crop_path", None),
+        "hero_overlay_path": getattr(artifacts, "hero_overlay_path", None),
+        "board_crop_path": getattr(artifacts, "board_crop_path", None),
+        "board_overlay_path": getattr(artifacts, "board_overlay_path", None),
+        "extra_paths": dict(getattr(artifacts, "extra_paths", {}) or {}),
+    }
     ui_error = {
         "error_stage": stage,
         "error_message": message,
         "failure_reason": failure_reason,
         "failed_frame_json_path": failure_paths.get("failed_frame_json_path"),
         "ui_error_state_path": failure_paths.get("ui_error_state_path"),
+        **artifact_paths,
     }
 
     return {
@@ -598,6 +634,7 @@ def _build_ui_error_state(
             "failure_reason": failure_reason,
             "failed_frame_json_path": failure_paths.get("failed_frame_json_path"),
             "ui_error_state_path": failure_paths.get("ui_error_state_path"),
+            **artifact_paths,
         },
         "ui_error": ui_error,
     }
@@ -613,7 +650,7 @@ def _save_failed_frame_and_build_ui_error(
     artifacts: Any,
 ) -> dict[str, Any]:
     failed_frame_payload = _build_failed_frame_payload(analysis, hand, stage=stage, message=message, artifacts=artifacts)
-    ui_error_state = _build_ui_error_state(analysis, hand, stage=stage, message=message, failure_paths={})
+    ui_error_state = _build_ui_error_state(analysis, hand, stage=stage, message=message, failure_paths={}, artifacts=artifacts)
     failure_paths = storage.save_failure_state(stage, analysis.frame_id, failed_frame_payload, ui_error_state)
     ui_error_state["ui_error"].update(failure_paths)
     ui_error_state["analysis_panel"].update(failure_paths)
@@ -859,39 +896,86 @@ class PokerVisionPipeline:
         analysis.hero_card_detections = hero_card_dets
         hero_val = validate_hero_cards(hero_local_dets)
         analysis.validation["hero_cards_ok"] = hero_val.ok
+        analysis.validation["hero_cards_retry"] = {
+            "attempted": False,
+            "recovered": False,
+            "primary_detection_count": len(hero_local_dets),
+            "primary_errors": list(hero_val.errors),
+        }
         if hero_val.ok:
             analysis.hero_cards = hero_val.meta["cards"]
         else:
-            analysis.errors.extend(hero_val.errors)
-            artifacts = self.storage.save_failure_artifacts(
-                "hero_cards",
-                frame.frame_id,
-                frame.image,
-                overlay_frame=overlay,
-                hero_crop=hero_crop,
-                hero_overlay=hero_overlay,
-                player_crops=player_crops,
-                player_overlays=player_overlays,
-                table_amount_crops=table_amount_crops,
-                table_amount_overlays=table_amount_overlays,
-                debug_images=[overlay, hero_overlay],
-            )
-            self.hand_manager.register_error(
-                self.hand_manager.active_hand,
-                "hero_cards",
-                "; ".join(hero_val.errors),
-                frame.frame_id,
-                True,
-            )
-            error_render_state = _save_failed_frame_and_build_ui_error(
-                self.storage,
-                analysis,
-                self.hand_manager.active_hand,
-                stage="hero_cards",
-                message="; ".join(hero_val.errors),
-                artifacts=artifacts,
-            )
-            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
+            retry_crop = None
+            retry_overlay = None
+            retry_global_dets: list[Detection] = []
+            retry_local_dets: list[Detection] = []
+            retry_val = None
+            if self.settings.max_retry_per_stage > 0:
+                retry_bbox = _expand_bbox_for_retry(hero_bbox, frame.image, pad_x=28.0, pad_top=20.0, pad_bottom=36.0)
+                retry_crop, retry_origin = build_hero_crop(frame.image, retry_bbox, self.settings)
+                retry_global_dets = self.detector_backend.detect_hero_cards(frame, retry_bbox)
+                retry_local_dets = _localize(retry_global_dets, retry_origin)
+                retry_overlay = _draw_detections(retry_crop, retry_local_dets, color=(0, 255, 255))
+                retry_val = validate_hero_cards(retry_local_dets)
+                analysis.validation["hero_cards_retry"] = {
+                    "attempted": True,
+                    "recovered": bool(retry_val.ok),
+                    "primary_detection_count": len(hero_local_dets),
+                    "retry_detection_count": len(retry_local_dets),
+                    "primary_errors": list(hero_val.errors),
+                    "retry_errors": list(retry_val.errors),
+                    "retry_bbox": _safe_jsonable(retry_bbox),
+                }
+                if retry_val.ok:
+                    analysis.hero_card_detections = retry_global_dets
+                    analysis.hero_cards = retry_val.meta["cards"]
+                    analysis.validation["hero_cards_ok"] = True
+                    analysis.warnings.append("hero_cards recovered by expanded retry crop")
+                    hero_crop = retry_crop
+                    hero_overlay = retry_overlay
+            if not analysis.validation.get("hero_cards_ok"):
+                analysis.errors.extend(hero_val.errors)
+                retry_debug_images = [overlay, hero_overlay]
+                if retry_overlay is not None:
+                    retry_debug_images.append(retry_overlay)
+                artifacts = self.storage.save_failure_artifacts(
+                    "hero_cards",
+                    frame.frame_id,
+                    frame.image,
+                    overlay_frame=overlay,
+                    hero_crop=hero_crop,
+                    hero_overlay=hero_overlay,
+                    player_crops=player_crops,
+                    player_overlays=player_overlays,
+                    table_amount_crops=table_amount_crops,
+                    table_amount_overlays=table_amount_overlays,
+                    debug_images=retry_debug_images,
+                    extra_images={
+                        "hero_primary_crop": hero_crop,
+                        "hero_primary_overlay": hero_overlay,
+                        **({"hero_retry_crop": retry_crop} if retry_crop is not None else {}),
+                        **({"hero_retry_overlay": retry_overlay} if retry_overlay is not None else {}),
+                    },
+                )
+                full_message = "; ".join(hero_val.errors)
+                if retry_val is not None and retry_val.errors:
+                    full_message = f"{full_message} | retry: {'; '.join(retry_val.errors)}"
+                self.hand_manager.register_error(
+                    self.hand_manager.active_hand,
+                    "hero_cards",
+                    full_message,
+                    frame.frame_id,
+                    True,
+                )
+                error_render_state = _save_failed_frame_and_build_ui_error(
+                    self.storage,
+                    analysis,
+                    self.hand_manager.active_hand,
+                    stage="hero_cards",
+                    message=full_message,
+                    artifacts=artifacts,
+                )
+                return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
 
         board_crop = None
         board_overlay = None
