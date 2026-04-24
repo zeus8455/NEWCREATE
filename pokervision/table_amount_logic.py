@@ -319,10 +319,20 @@ def _assign_chip_like_entry(
     street: str,
     settings,
 ) -> None:
+    inside_pot_exclusion = False
     if table_center is not None and _distance(region_center, table_center) <= settings.table_pot_center_exclusion_radius_px:
+        # Do NOT immediately discard Chips near the pot/table center.
+        #
+        # On compact table layouts the upper player's betting lane can be very close
+        # to TotalPot. A real bet/open from the top seat can therefore fall inside
+        # table_pot_center_exclusion_radius_px and was previously pushed straight to
+        # unassigned_chips before seat geometry had any chance to match it.
+        #
+        # Keep the warning, continue through normal betting-lane matching, and only
+        # allow the assignment if the match is strong enough. Weak/ambiguous center
+        # chips are still dropped below.
+        inside_pot_exclusion = True
         entry.setdefault("warnings", []).append("Chips region inside pot exclusion radius")
-        state.unassigned_chips.append(entry)
-        return
 
     live_candidate_names = [name for name in live_positions if name in position_centers]
     occupied_candidate_names = [name for name in _occupied_positions(positions) if name in position_centers]
@@ -401,6 +411,45 @@ def _assign_chip_like_entry(
         entry["match_score_px"] = round(chosen_score, 3)
     if chosen_meta is not None:
         entry["match_details"] = chosen_meta
+
+    if inside_pot_exclusion and chosen_rejection is None:
+        recovery_max_score = float(
+            getattr(
+                settings,
+                "chips_pot_exclusion_recovery_max_score_px",
+                min(float(getattr(settings, "chips_to_position_max_distance_px", 120.0)), 60.0),
+            )
+        )
+        recovery_margin = float(
+            getattr(
+                settings,
+                "chips_pot_exclusion_recovery_margin_px",
+                max(float(getattr(settings, "chips_ambiguity_margin_px", 40.0)) * 2.0, 70.0),
+            )
+        )
+        confident_score = chosen_score is not None and float(chosen_score) <= recovery_max_score
+        confident_margin = (
+            chosen_second_score is None
+            or chosen_score is None
+            or (float(chosen_second_score) - float(chosen_score)) >= recovery_margin
+        )
+        if not (confident_score and confident_margin):
+            entry.setdefault("warnings", []).append(
+                "Chips inside pot exclusion radius without confident betting-lane recovery"
+            )
+            entry["pot_exclusion_recovery_rejected"] = True
+            entry["pot_exclusion_recovery_max_score_px"] = round(recovery_max_score, 3)
+            entry["pot_exclusion_recovery_margin_px"] = round(recovery_margin, 3)
+            if chosen_second_score is not None:
+                entry["second_best_match_score_px"] = round(chosen_second_score, 3)
+            state.unassigned_chips.append(entry)
+            return
+        entry.setdefault("warnings", []).append(
+            "Chips inside pot exclusion radius recovered by confident betting-lane match"
+        )
+        entry["pot_exclusion_recovery"] = True
+        entry["pot_exclusion_recovery_max_score_px"] = round(recovery_max_score, 3)
+        entry["pot_exclusion_recovery_margin_px"] = round(recovery_margin, 3)
 
     if chosen_rejection == "too_far":
         entry.setdefault("warnings", []).append("Chips too far from any logical betting lane")
