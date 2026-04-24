@@ -236,6 +236,8 @@ class AutoClickSnapshot:
     monitor_width: int = 0
     monitor_height: int = 0
     frame_source: str = "launcher_frame"
+    slot_id: str = "table_01"
+    slot_bbox: Optional[Tuple[int, int, int, int]] = None
 
 
 @dataclass(slots=True)
@@ -325,6 +327,30 @@ class AutoClickConfig:
     disable_aggressive_auto_actions: bool = False
     require_identity_match: bool = True
     log_prefix: str = "[AutoClick]"
+
+
+@dataclass(slots=True)
+class AutoClickSlotState:
+    state: str = STATE_IDLE
+    wait_started_at: Optional[float] = None
+    error_started_at: Optional[float] = None
+    post_click_until: float = 0.0
+    last_cycle_key: Optional[str] = None
+    last_hand_id: Optional[str] = None
+    last_executed_decision_id: Optional[str] = None
+    last_executed_solver_fingerprint: Optional[str] = None
+    last_executed_source_frame_id: Optional[str] = None
+    last_executed_hand_id: Optional[str] = None
+    last_executed_street: Optional[str] = None
+    last_executed_plan_name: Optional[str] = None
+    last_executed_at: Optional[float] = None
+    last_executed_decision_guard: Optional[str] = None
+    locked_decision_id: Optional[str] = None
+    locked_decision_guard: Optional[str] = None
+    last_plan_name: Optional[str] = None
+    last_normalized_action: Optional[str] = None
+    last_raw_action: Optional[str] = None
+    last_click_at: Optional[float] = None
 
 
 class ButtonDetectorProtocol(Protocol):
@@ -457,30 +483,86 @@ class AutoClickRuntime:
                 LOGGER.exception("%s failed to initialize button detector", self.config.log_prefix)
                 self.button_detector = None
 
-        self.state = STATE_IDLE
-        self.wait_started_at: Optional[float] = None
-        self.error_started_at: Optional[float] = None
-        self.post_click_until = 0.0
-        self.last_cycle_key: Optional[str] = None
-        self.last_hand_id: Optional[str] = None
-        self.last_executed_decision_id: Optional[str] = None
-        self.last_executed_solver_fingerprint: Optional[str] = None
-        self.last_executed_source_frame_id: Optional[str] = None
-        self.last_executed_hand_id: Optional[str] = None
-        self.last_executed_street: Optional[str] = None
-        self.last_executed_plan_name: Optional[str] = None
-        self.last_executed_at: Optional[float] = None
-        self.last_executed_decision_guard: Optional[str] = None
-        self.locked_decision_id: Optional[str] = None
-        self.locked_decision_guard: Optional[str] = None
-        self.last_plan_name: Optional[str] = None
-        self.last_normalized_action: Optional[str] = None
-        self.last_raw_action: Optional[str] = None
-        self.last_click_at: Optional[float] = None
+        self._slot_states: Dict[str, AutoClickSlotState] = {}
+        self._active_slot_key = "table_01"
+        self._ensure_slot_state(self._active_slot_key)
         self.next_idle_at = self._schedule_next_idle(time.monotonic())
         self.recent_events: List[AutoClickEvent] = []
         self.debug_root = Path(self.config.debug_root_dir).expanduser().resolve()
         self.debug_root.mkdir(parents=True, exist_ok=True)
+
+    _SLOT_STATE_FIELDS = {
+        "state",
+        "wait_started_at",
+        "error_started_at",
+        "post_click_until",
+        "last_cycle_key",
+        "last_hand_id",
+        "last_executed_decision_id",
+        "last_executed_solver_fingerprint",
+        "last_executed_source_frame_id",
+        "last_executed_hand_id",
+        "last_executed_street",
+        "last_executed_plan_name",
+        "last_executed_at",
+        "last_executed_decision_guard",
+        "locked_decision_id",
+        "locked_decision_guard",
+        "last_plan_name",
+        "last_normalized_action",
+        "last_raw_action",
+        "last_click_at",
+    }
+
+    def __getattribute__(self, name: str):
+        slot_fields = object.__getattribute__(self, "_SLOT_STATE_FIELDS")
+        if name in slot_fields:
+            try:
+                slot_states = object.__getattribute__(self, "_slot_states")
+            except AttributeError:
+                return object.__getattribute__(self, name)
+            slot_key = object.__getattribute__(self, "_active_slot_key") if hasattr(self, "_active_slot_key") else "table_01"
+            if slot_key not in slot_states:
+                object.__getattribute__(self, "_ensure_slot_state")(slot_key)
+                slot_states = object.__getattribute__(self, "_slot_states")
+            return getattr(slot_states[slot_key], name)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        slot_fields = getattr(type(self), "_SLOT_STATE_FIELDS", set())
+        if name in slot_fields and "_slot_states" in self.__dict__:
+            slot_states = object.__getattribute__(self, "_slot_states")
+            slot_key = object.__getattribute__(self, "_active_slot_key") if "_active_slot_key" in self.__dict__ else "table_01"
+            if slot_key not in slot_states:
+                self._ensure_slot_state(slot_key)
+                slot_states = object.__getattribute__(self, "_slot_states")
+            setattr(slot_states[slot_key], name, value)
+            return
+        object.__setattr__(self, name, value)
+
+    def _normalize_slot_key(self, slot_id: object) -> str:
+        raw = str(slot_id or "").strip()
+        return raw or "table_01"
+
+    def _ensure_slot_state(self, slot_id: object = None) -> AutoClickSlotState:
+        slot_key = self._normalize_slot_key(slot_id if slot_id is not None else getattr(self, "_active_slot_key", "table_01"))
+        slot_states = object.__getattribute__(self, "_slot_states")
+        state = slot_states.get(slot_key)
+        if state is None:
+            state = AutoClickSlotState()
+            slot_states[slot_key] = state
+        return state
+
+    def _activate_slot(self, slot_id: object) -> str:
+        slot_key = self._normalize_slot_key(slot_id)
+        object.__setattr__(self, "_active_slot_key", slot_key)
+        self._ensure_slot_state(slot_key)
+        return slot_key
+
+    def _reset_slot_state(self, slot_key: object) -> None:
+        normalized = self._normalize_slot_key(slot_key)
+        slot_states = object.__getattribute__(self, "_slot_states")
+        slot_states[normalized] = AutoClickSlotState()
 
     def _build_default_mouse_backend(self) -> MouseBackendProtocol:
         if os.name == "nt" and ctypes is not None:
@@ -576,12 +658,18 @@ class AutoClickRuntime:
         monitor_width: int = 0,
         monitor_height: int = 0,
         monitor_name: str = "primary",
+        slot_id: str = "table_01",
+        slot_bbox: Optional[Tuple[int, int, int, int]] = None,
     ) -> AutoClickSnapshot:
         hero_decision, decision_ready, stripped_reason = self._sanitize_launcher_decision(hero_decision, decision_ready)
         street = "preflop"
         hand_id = None
         total_pot_bb = None
         meta: Dict[str, object] = {}
+        slot_id = self._normalize_slot_key(slot_id)
+        meta["slot_id"] = slot_id
+        if slot_bbox is not None:
+            meta.setdefault("slot_bbox", list(slot_bbox))
         if stripped_reason:
             meta["autoclick_decision_absent_reason"] = stripped_reason
         if hero_decision is not None:
@@ -653,6 +741,8 @@ class AutoClickRuntime:
             monitor_height=int(monitor_height),
             monitor_name=str(monitor_name or "primary"),
             frame_source="launcher_frame",
+            slot_id=slot_id,
+            slot_bbox=slot_bbox,
         )
 
     def step(
@@ -662,6 +752,7 @@ class AutoClickRuntime:
         frame_bgr: Any = None,
         detections: Optional[Sequence[ButtonDetection]] = None,
     ) -> AutoClickResult:
+        slot_key = self._activate_slot(getattr(snapshot, "slot_id", "table_01"))
         now = time.monotonic()
         events: List[AutoClickEvent] = []
         if not self.config.enabled:
@@ -913,38 +1004,24 @@ class AutoClickRuntime:
         return self._finalize(self._result_from_state(plan, executed, events, locked=executed))
 
     def reset(self) -> None:
-        self.state = STATE_IDLE
-        self.wait_started_at = None
-        self.error_started_at = None
-        self.post_click_until = 0.0
-        self.last_cycle_key = None
-        self.last_hand_id = None
-        self.last_executed_decision_id = None
-        self.last_executed_solver_fingerprint = None
-        self.last_executed_source_frame_id = None
-        self.last_executed_hand_id = None
-        self.last_executed_street = None
-        self.last_executed_plan_name = None
-        self.last_executed_at = None
-        self.last_executed_decision_guard = None
-        self.locked_decision_id = None
-        self.locked_decision_guard = None
-        self.last_plan_name = None
-        self.last_normalized_action = None
-        self.last_raw_action = None
-        self.last_click_at = None
+        slot_keys = list(getattr(self, "_slot_states", {}).keys())
+        if not slot_keys:
+            self._reset_slot_state("table_01")
+            return
+        for slot_key in slot_keys:
+            self._reset_slot_state(slot_key)
 
     def get_recent_events(self) -> List[AutoClickEvent]:
         return list(self.recent_events)
 
     def _cycle_key(self, snapshot: AutoClickSnapshot) -> str:
         if snapshot.hand_id:
-            return f"hand:{snapshot.hand_id}"
+            return f"slot:{snapshot.slot_id}:hand:{snapshot.hand_id}"
         if snapshot.active_hero_present and self.last_hand_id:
-            return f"hand:{self.last_hand_id}"
+            return f"slot:{snapshot.slot_id}:hand:{self.last_hand_id}"
         if snapshot.active_hero_present:
-            return "active_hero_session"
-        return f"started:{float(snapshot.decision_started_at):.6f}"
+            return f"slot:{snapshot.slot_id}:active_hero_session"
+        return f"slot:{snapshot.slot_id}:started:{float(snapshot.decision_started_at):.6f}"
 
     def _should_reset_cycle(self, snapshot: AutoClickSnapshot, cycle_key: str) -> bool:
         if self.last_cycle_key is None:
@@ -1368,6 +1445,7 @@ class AutoClickRuntime:
             debug.get("source_frame_id") if isinstance(debug, dict) else None,
             meta.get("source_frame_id"),
         )
+        slot_id = self._normalize_slot_key(getattr(snapshot, "slot_id", meta.get("slot_id")))
         hand_id = _first_non_empty(snapshot.hand_id, meta.get("hand_id"))
         street = _first_non_empty(snapshot.street, getattr(decision, "street", None), meta.get("street"))
         guard_key = decision_id if decision_id else f"execution_token:{execution_token}"
@@ -1376,6 +1454,7 @@ class AutoClickRuntime:
             "decision_id": decision_id,
             "solver_fingerprint": solver_fingerprint,
             "source_frame_id": source_frame_id,
+            "slot_id": slot_id,
             "hand_id": hand_id,
             "street": street,
             "plan_name": plan.plan_name,
@@ -1401,6 +1480,7 @@ class AutoClickRuntime:
             self._event(
                 "decision_id_recorded_after_success",
                 decision_id=self.last_executed_decision_id or "",
+                slot_id=_first_non_empty(decision_memory.get("slot_id")) or "",
                 solver_fingerprint=self.last_executed_solver_fingerprint or "",
                 source_frame_id=self.last_executed_source_frame_id or "",
                 hand_id=self.last_executed_hand_id or "",
@@ -1417,6 +1497,8 @@ class AutoClickRuntime:
         debug = getattr(decision, "debug", {}) or {}
         meta = dict(snapshot.solver_context_meta or {})
         token_payload = {
+            "slot_id": self._normalize_slot_key(getattr(snapshot, "slot_id", None)),
+            "slot_id": snapshot.slot_id,
             "hand_id": snapshot.hand_id,
             "street": snapshot.street,
             "solver_fingerprint": _first_non_empty(
@@ -1725,7 +1807,9 @@ class AutoClickRuntime:
                 "ts": item["ts"],
                 "event_name": item["name"],
                 "event_payload": item["payload"],
-                "hand_id": snapshot.hand_id,
+                "slot_id": snapshot.slot_id,
+                "slot_id": snapshot.slot_id,
+            "hand_id": snapshot.hand_id,
                 "street": snapshot.street,
                 "channel": channel,
                 "solver_context_meta": snapshot.solver_context_meta,
@@ -1746,6 +1830,7 @@ class AutoClickRuntime:
         serialized_events = self._events_to_dict(events)
         payload = {
             "ts": time.time(),
+            "slot_id": snapshot.slot_id,
             "hand_id": snapshot.hand_id,
             "street": snapshot.street,
             "capture_meta": capture_meta,
@@ -1773,6 +1858,7 @@ class AutoClickRuntime:
         serialized_events = self._events_to_dict(events)
         payload = {
             "ts": time.time(),
+            "slot_id": snapshot.slot_id,
             "hand_id": snapshot.hand_id,
             "street": snapshot.street,
             "plan_name": plan.plan_name,

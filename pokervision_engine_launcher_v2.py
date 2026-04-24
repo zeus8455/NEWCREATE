@@ -2326,6 +2326,8 @@ class IntegratedRunner:
                         action_panel_bbox=None,
                         monitor_width=frame_width,
                         monitor_height=frame_height,
+                        slot_id=self._last_processed_slot_id or self.selected_slot_id,
+                        slot_bbox=get_slot_bbox(self._last_processed_slot_id or self.selected_slot_id),
                     )
                     auto_click_result = self.auto_click_runtime.step(snapshot, frame_bgr=frame_for_autoclick)
                 except Exception:
@@ -2446,6 +2448,8 @@ class IntegratedRunner:
                     action_panel_bbox=action_panel_bbox,
                     monitor_width=frame_width,
                     monitor_height=frame_height,
+                    slot_id=processing_slot_id,
+                    slot_bbox=get_slot_bbox(processing_slot_id),
                 )
                 auto_click_result = self.auto_click_runtime.step(
                     snapshot,
