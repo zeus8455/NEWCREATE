@@ -20,6 +20,7 @@ from __future__ import annotations
 """
 
 import argparse
+import copy
 import ast
 import json
 import re
@@ -172,6 +173,7 @@ class SlotContext:
     slot_id: str
     bbox: Tuple[int, int, int, int]
     paths: Dict[str, Path]
+    settings: Any
     storage: Any
     hand_manager: Any
     pipeline: Any
@@ -1880,7 +1882,7 @@ class IntegratedRunner:
         self._round_robin_slots = iter_slots_round_robin()
         self.slot_contexts: Dict[str, SlotContext] = {}
         self.slot_states: Dict[str, SlotRuntimeState] = {}
-        self.storage = self._build_storage_for_slot(SLOT_IDS[0])
+        self.storage = StorageManager(self.settings)
         self.hand_manager = HandStateManager(
             self.settings.schema_version,
             self.settings.hand_stale_timeout_sec,
@@ -1893,30 +1895,56 @@ class IntegratedRunner:
         if self.multi_table_enabled:
             self._init_slot_contexts()
 
-    def _build_storage_for_slot(self, slot_id: str):
+    def _build_slot_settings(self, slot_id: str) -> Tuple[Any, Dict[str, Path]]:
+        """Create an isolated Settings clone for one table slot.
+
+        StorageManager derives hands/logs/temp paths from settings.root_dir.
+        If all slot pipelines share self.settings, every hand history is written
+        into the same root even when the frame_id contains table_02/table_03.
+        The fix is to give each slot pipeline its own settings object rooted at:
+            <project_root>/tables/table_XX
+        """
+        normalized = normalize_slot_id(slot_id)
+        paths = resolve_slot_paths(normalized, Path(self.settings.root_dir))
         try:
-            return StorageManager(self.settings, slot_id=slot_id)
-        except TypeError:
-            storage = StorageManager(self.settings)
-            if hasattr(storage, "set_slot_id"):
-                storage.set_slot_id(slot_id)
-            return storage
+            slot_settings = copy.copy(self.settings)
+        except Exception:
+            slot_settings = get_default_settings()
+            try:
+                for name in dir(self.settings):
+                    if name.startswith("_"):
+                        continue
+                    try:
+                        value = getattr(self.settings, name)
+                    except Exception:
+                        continue
+                    if callable(value):
+                        continue
+                    try:
+                        setattr(slot_settings, name, value)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        slot_settings.root_dir = paths["slot_root"]
+        return slot_settings, paths
 
     def _init_slot_contexts(self) -> None:
         for slot_id in SLOT_IDS:
-            paths = resolve_slot_paths(slot_id, Path(self.settings.root_dir))
-            storage = self._build_storage_for_slot(slot_id)
+            slot_settings, paths = self._build_slot_settings(slot_id)
+            storage = StorageManager(slot_settings)
             hand_manager = HandStateManager(
-                self.settings.schema_version,
-                self.settings.hand_stale_timeout_sec,
-                self.settings.hand_close_timeout_sec,
+                slot_settings.schema_version,
+                slot_settings.hand_stale_timeout_sec,
+                slot_settings.hand_close_timeout_sec,
             )
-            pipeline = PokerVisionPipeline(self.settings, self.detector, storage, hand_manager)
+            pipeline = PokerVisionPipeline(slot_settings, self.detector, storage, hand_manager)
             runtime = self._build_auto_click_runtime(self.args, slot_id=slot_id)
             self.slot_contexts[slot_id] = SlotContext(
                 slot_id=slot_id,
                 bbox=get_slot_bbox(slot_id),
                 paths=paths,
+                settings=slot_settings,
                 storage=storage,
                 hand_manager=hand_manager,
                 pipeline=pipeline,
