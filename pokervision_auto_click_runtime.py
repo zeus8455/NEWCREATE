@@ -331,10 +331,10 @@ class AutoClickConfig:
     move_duration_ms_max: int = 620
     target_jitter_px_min: int = 2
     target_jitter_px_max: int = 7
-    click_target_inner_padding_px_min: int = 3
-    click_target_inner_padding_px_max: int = 10
-    click_target_inner_padding_ratio_min: float = 0.02
-    click_target_inner_padding_ratio_max: float = 0.05
+    click_target_inner_padding_px_min: int = 5
+    click_target_inner_padding_px_max: int = 12
+    click_target_inner_padding_ratio_min: float = 0.05
+    click_target_inner_padding_ratio_max: float = 0.10
     mouse_curve_offset_px_min: int = 18
     mouse_curve_offset_px_max: int = 125
     mouse_overshoot_probability: float = 0.42
