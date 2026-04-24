@@ -633,10 +633,11 @@ class AutoClickRuntime:
         }
         joined_reason = " | ".join(part for part in (solver_status, fallback_reason, reason_text) if part)
         has_unusable_marker = any(marker in joined_reason for marker in unusable_markers)
-        has_clickable_action = bool(engine_action or extracted_action)
-        if not has_clickable_action:
+        non_clickable_actions = {"", "none", "error", "unsupported", "invalid"}
+        normalized_action = extracted_action or engine_action
+        if normalized_action in non_clickable_actions:
             return None, False, "missing_clickable_action"
-        if has_unusable_marker and engine_action in ("", "none"):
+        if has_unusable_marker and engine_action in non_clickable_actions:
             return None, False, "solver_unavailable"
         if not decision_ready:
             return hero_decision, False, None
@@ -1092,12 +1093,30 @@ class AutoClickRuntime:
         )
 
     def _get_detection_frame(self, snapshot: AutoClickSnapshot, frame_bgr: Any) -> Tuple[Any, Dict[str, object]]:
+        width = int(snapshot.monitor_width or 0)
+        height = int(snapshot.monitor_height or 0)
+        if self.config.force_primary_monitor_capture and mss is not None and np is not None and width > 0 and height > 0:
+            monitor = {
+                "left": int(snapshot.monitor_left),
+                "top": int(snapshot.monitor_top),
+                "width": width,
+                "height": height,
+            }
+            try:
+                with mss.mss() as sct:
+                    shot = sct.grab(monitor)
+                frame = np.array(shot)
+                if frame.ndim == 3 and frame.shape[2] == 4:
+                    frame = frame[:, :, :3]
+                return frame, {"source": "mss_forced", **monitor}
+            except Exception as exc:
+                if frame_bgr is not None:
+                    return frame_bgr, {"source": "launcher_frame_fallback", "error": str(exc)}
+                return None, {"source": "capture_error", "error": str(exc)}
         if frame_bgr is not None:
             return frame_bgr, {"source": "launcher_frame"}
         if mss is None or np is None:
             return None, {"source": "none"}
-        width = int(snapshot.monitor_width or 0)
-        height = int(snapshot.monitor_height or 0)
         if width <= 0 or height <= 0:
             return None, {"source": "none"}
         monitor = {

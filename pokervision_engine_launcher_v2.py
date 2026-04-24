@@ -2223,12 +2223,20 @@ class IntegratedRunner:
     def _build_autoclick_decision_from_render_state(self, render_state: Optional[Dict[str, Any]], *, expected_frame_id: Optional[str] = None) -> Optional[HeroDecision]:
         if not isinstance(render_state, dict):
             return None
+        if str(render_state.get("status") or "").strip().lower() == "error":
+            return None
         identity = self._extract_identity_from_render_state(render_state)
         frame_id = identity.get("source_frame_id")
         if expected_frame_id and frame_id and str(frame_id) != str(expected_frame_id):
             return None
         hero_debug = render_state.get("hero_decision_debug") if isinstance(render_state.get("hero_decision_debug"), dict) else {}
         engine_result = render_state.get("engine_result") if isinstance(render_state.get("engine_result"), dict) else {}
+        engine_status = str(engine_result.get("status") or "").strip().lower()
+        engine_action = str(engine_result.get("engine_action") or render_state.get("recommended_action") or "").strip().lower()
+        if engine_status in {"error", "frame_failed_before_render_build"}:
+            return None
+        if engine_action in {"", "error", "unsupported", "invalid", "none"}:
+            return None
         solver_context = render_state.get("solver_context") if isinstance(render_state.get("solver_context"), dict) else {}
         preflop = hero_debug.get("preflop") if isinstance(hero_debug.get("preflop"), dict) else None
         postflop = hero_debug.get("postflop") if isinstance(hero_debug.get("postflop"), dict) else None
@@ -2291,9 +2299,9 @@ class IntegratedRunner:
         authoritative_identity = self._decision_identity_tuple(authoritative)
         if live_decision is None:
             return authoritative, "render_state_authoritative_no_live_decision"
-        if live_identity != authoritative_identity:
-            return authoritative, "render_state_authoritative_mismatch"
-        return live_decision, None
+        if live_identity == authoritative_identity:
+            return authoritative, None
+        return live_decision, "prefer_live_decision_on_identity_mismatch"
 
     def process_once(self):
         full_frame = self.source.next_frame()
@@ -2329,7 +2337,7 @@ class IntegratedRunner:
                         slot_id=self._last_processed_slot_id or self.selected_slot_id,
                         slot_bbox=get_slot_bbox(self._last_processed_slot_id or self.selected_slot_id),
                     )
-                    auto_click_result = self.auto_click_runtime.step(snapshot, frame_bgr=frame_for_autoclick)
+                    auto_click_result = self.auto_click_runtime.step(snapshot, frame_bgr=None)
                 except Exception:
                     auto_click_trace = traceback.format_exc(limit=8)
                     exception_text = auto_click_trace
@@ -2453,7 +2461,7 @@ class IntegratedRunner:
                 )
                 auto_click_result = self.auto_click_runtime.step(
                     snapshot,
-                    frame_bgr=frame_for_autoclick,
+                    frame_bgr=None,
                 )
             except Exception:
                 auto_click_trace = traceback.format_exc(limit=8)
