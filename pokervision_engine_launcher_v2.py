@@ -2444,7 +2444,12 @@ class IntegratedRunner:
                 if autoclick_reason:
                     note = f"AUTOCLICK_DECISION_OVERRIDE: {autoclick_reason}"
                     analysis_text = f"{analysis_text}\n\n{note}" if analysis_text else note
+                slot_frame_for_autoclick = self._normalize_frame_for_autoclick(getattr(frame, "image", None))
                 action_panel_bbox = None
+                if slot_frame_for_autoclick is not None and hasattr(slot_frame_for_autoclick, "shape") and len(slot_frame_for_autoclick.shape) >= 2:
+                    local_h = int(slot_frame_for_autoclick.shape[0])
+                    local_w = int(slot_frame_for_autoclick.shape[1])
+                    action_panel_bbox = (0.0, 0.0, float(local_w), float(local_h))
                 snapshot = self.auto_click_runtime.build_snapshot_from_launcher(
                     active_hero_present=active_hero_present,
                     hero_decision=autoclick_decision,
@@ -2461,7 +2466,7 @@ class IntegratedRunner:
                 )
                 auto_click_result = self.auto_click_runtime.step(
                     snapshot,
-                    frame_bgr=None,
+                    frame_bgr=slot_frame_for_autoclick,
                 )
             except Exception:
                 auto_click_trace = traceback.format_exc(limit=8)
