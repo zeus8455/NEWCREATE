@@ -2317,12 +2317,15 @@ class IntegratedRunner:
             existing_render_state = None
             if self.auto_click_runtime is not None:
                 try:
-                    frame_for_autoclick = self._normalize_frame_for_autoclick(getattr(full_frame, "image", None))
+                    idle_slot_id = self._last_processed_slot_id or self.selected_slot_id
+                    idle_slot_frame = self._normalize_frame_for_autoclick(getattr(display_frame, "image", None))
                     frame_width = 0
                     frame_height = 0
-                    if frame_for_autoclick is not None and hasattr(frame_for_autoclick, "shape") and len(frame_for_autoclick.shape) >= 2:
-                        frame_height = int(frame_for_autoclick.shape[0])
-                        frame_width = int(frame_for_autoclick.shape[1])
+                    action_panel_bbox = None
+                    if idle_slot_frame is not None and hasattr(idle_slot_frame, "shape") and len(idle_slot_frame.shape) >= 2:
+                        frame_height = int(idle_slot_frame.shape[0])
+                        frame_width = int(idle_slot_frame.shape[1])
+                        action_panel_bbox = (0.0, 0.0, float(frame_width), float(frame_height))
                     snapshot = self.auto_click_runtime.build_snapshot_from_launcher(
                         active_hero_present=False,
                         hero_decision=None,
@@ -2331,13 +2334,13 @@ class IntegratedRunner:
                         hand=None,
                         critical_error_flag=False,
                         critical_error_text=None,
-                        action_panel_bbox=None,
+                        action_panel_bbox=action_panel_bbox,
                         monitor_width=frame_width,
                         monitor_height=frame_height,
-                        slot_id=self._last_processed_slot_id or self.selected_slot_id,
-                        slot_bbox=get_slot_bbox(self._last_processed_slot_id or self.selected_slot_id),
+                        slot_id=idle_slot_id,
+                        slot_bbox=get_slot_bbox(idle_slot_id),
                     )
-                    auto_click_result = self.auto_click_runtime.step(snapshot, frame_bgr=None)
+                    auto_click_result = self.auto_click_runtime.step(snapshot, frame_bgr=idle_slot_frame)
                 except Exception:
                     auto_click_trace = traceback.format_exc(limit=8)
                     exception_text = auto_click_trace
@@ -2428,12 +2431,14 @@ class IntegratedRunner:
 
         if self.auto_click_runtime is not None:
             try:
-                frame_for_autoclick = self._normalize_frame_for_autoclick(getattr(full_frame, "image", None))
+                slot_frame_for_autoclick = self._normalize_frame_for_autoclick(getattr(frame, "image", None))
                 frame_width = 0
                 frame_height = 0
-                if frame_for_autoclick is not None and hasattr(frame_for_autoclick, "shape") and len(frame_for_autoclick.shape) >= 2:
-                    frame_height = int(frame_for_autoclick.shape[0])
-                    frame_width = int(frame_for_autoclick.shape[1])
+                action_panel_bbox = None
+                if slot_frame_for_autoclick is not None and hasattr(slot_frame_for_autoclick, "shape") and len(slot_frame_for_autoclick.shape) >= 2:
+                    frame_height = int(slot_frame_for_autoclick.shape[0])
+                    frame_width = int(slot_frame_for_autoclick.shape[1])
+                    action_panel_bbox = (0.0, 0.0, float(frame_width), float(frame_height))
                 active_hero_present = bool(getattr(result.analysis, "active_hero_found", False))
                 autoclick_decision, autoclick_reason = self._select_autoclick_decision(
                     live_decision=decision,
@@ -2444,12 +2449,6 @@ class IntegratedRunner:
                 if autoclick_reason:
                     note = f"AUTOCLICK_DECISION_OVERRIDE: {autoclick_reason}"
                     analysis_text = f"{analysis_text}\n\n{note}" if analysis_text else note
-                slot_frame_for_autoclick = self._normalize_frame_for_autoclick(getattr(frame, "image", None))
-                action_panel_bbox = None
-                if slot_frame_for_autoclick is not None and hasattr(slot_frame_for_autoclick, "shape") and len(slot_frame_for_autoclick.shape) >= 2:
-                    local_h = int(slot_frame_for_autoclick.shape[0])
-                    local_w = int(slot_frame_for_autoclick.shape[1])
-                    action_panel_bbox = (0.0, 0.0, float(local_w), float(local_h))
                 snapshot = self.auto_click_runtime.build_snapshot_from_launcher(
                     active_hero_present=active_hero_present,
                     hero_decision=autoclick_decision,
