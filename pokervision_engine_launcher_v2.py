@@ -1852,6 +1852,63 @@ class IntegratedRunner:
             return image
         return image
 
+    def _infer_table_roi_bbox(self, frame_bgr, result) -> Optional[Tuple[int, int, int, int]]:
+        if frame_bgr is None or not hasattr(frame_bgr, "shape") or len(frame_bgr.shape) < 2:
+            return None
+        frame_height = int(frame_bgr.shape[0])
+        frame_width = int(frame_bgr.shape[1])
+        hand = getattr(result, "hand", None)
+        positions = getattr(hand, "positions", None) if hand is not None else None
+        if not isinstance(positions, dict) or not positions:
+            return None
+
+        xs: List[int] = []
+        ys: List[int] = []
+        for payload in positions.values():
+            if not isinstance(payload, dict):
+                continue
+            bbox_payload = payload.get("bbox")
+            if not isinstance(bbox_payload, dict):
+                continue
+            x1 = self._safe_int(bbox_payload.get("x1"))
+            y1 = self._safe_int(bbox_payload.get("y1"))
+            x2 = self._safe_int(bbox_payload.get("x2"))
+            y2 = self._safe_int(bbox_payload.get("y2"))
+            if None in {x1, y1, x2, y2}:
+                continue
+            xs.extend([int(x1), int(x2)])
+            ys.extend([int(y1), int(y2)])
+        if not xs or not ys:
+            return None
+
+        min_x = min(xs)
+        max_x = max(xs)
+        min_y = min(ys)
+        max_y = max(ys)
+        span_x = max(1, max_x - min_x)
+        span_y = max(1, max_y - min_y)
+        pad_x = max(28, int(round(span_x * 0.12)))
+        pad_top = max(28, int(round(span_y * 0.12)))
+        pad_bottom = max(80, int(round(span_y * 0.34)))
+        x1 = max(0, min_x - pad_x)
+        y1 = max(0, min_y - pad_top)
+        x2 = min(frame_width, max_x + pad_x)
+        y2 = min(frame_height, max_y + pad_bottom)
+        return self._clamp_action_panel_bbox((x1, y1, x2, y2), frame_width, frame_height)
+
+    def _crop_table_roi_for_autoclick(self, frame_bgr, result) -> Tuple[Any, int, int, int, int]:
+        normalized = self._normalize_frame_for_autoclick(frame_bgr)
+        if normalized is None or not hasattr(normalized, "shape") or len(normalized.shape) < 2:
+            return normalized, 0, 0, 0, 0
+        frame_height = int(normalized.shape[0])
+        frame_width = int(normalized.shape[1])
+        bbox = self._infer_table_roi_bbox(normalized, result)
+        if bbox is None:
+            return normalized, 0, 0, frame_width, frame_height
+        x1, y1, x2, y2 = bbox
+        cropped = normalized[y1:y2, x1:x2].copy()
+        return cropped, int(x1), int(y1), int(x2 - x1), int(y2 - y1)
+
     def _safe_int(self, value: Any) -> Optional[int]:
         try:
             if value is None:
@@ -1917,78 +1974,6 @@ class IntegratedRunner:
         y1 = min(hero_top - int(frame_height * 0.12), int(frame_height * 0.56))
         y2 = max(hero_bottom + int(frame_height * 0.28), int(frame_height * 0.985))
         return self._clamp_action_panel_bbox((x1, y1, x2, y2), frame_width, frame_height) or default_bbox
-
-    def _iter_analysis_bboxes(self, result) -> Iterable[Tuple[float, float, float, float]]:
-        analysis = getattr(result, "analysis", None)
-        hand = getattr(result, "hand", None)
-        sources = []
-        if analysis is not None:
-            sources.append(getattr(analysis, "positions", None))
-            sources.append(getattr(analysis, "player_positions", None))
-            sources.append(getattr(analysis, "seat_positions", None))
-            sources.append(getattr(analysis, "table_amount_state", None))
-            sources.append(getattr(analysis, "amount_state", None))
-        if hand is not None:
-            sources.append(getattr(hand, "positions", None))
-            sources.append(getattr(hand, "table_amount_state", None))
-            sources.append(getattr(hand, "amount_state", None))
-        for source in sources:
-            if not isinstance(source, dict):
-                continue
-            for value in source.values():
-                if isinstance(value, dict):
-                    bbox = value.get("bbox")
-                    if isinstance(bbox, dict):
-                        try:
-                            yield (float(bbox.get("x1", 0.0)), float(bbox.get("y1", 0.0)), float(bbox.get("x2", 0.0)), float(bbox.get("y2", 0.0)))
-                        except Exception:
-                            pass
-                    for nested in value.values():
-                        if isinstance(nested, dict):
-                            bbox = nested.get("bbox")
-                            if isinstance(bbox, dict):
-                                try:
-                                    yield (float(bbox.get("x1", 0.0)), float(bbox.get("y1", 0.0)), float(bbox.get("x2", 0.0)), float(bbox.get("y2", 0.0)))
-                                except Exception:
-                                    pass
-
-    def _infer_table_roi_bbox(self, frame_bgr, result) -> Optional[Tuple[int, int, int, int]]:
-        if frame_bgr is None or not hasattr(frame_bgr, "shape") or len(frame_bgr.shape) < 2:
-            return None
-        frame_height = int(frame_bgr.shape[0])
-        frame_width = int(frame_bgr.shape[1])
-        bboxes = [bbox for bbox in self._iter_analysis_bboxes(result)]
-        if not bboxes:
-            return None
-        x1 = min(min(b[0], b[2]) for b in bboxes)
-        y1 = min(min(b[1], b[3]) for b in bboxes)
-        x2 = max(max(b[0], b[2]) for b in bboxes)
-        y2 = max(max(b[1], b[3]) for b in bboxes)
-        width = max(1.0, x2 - x1)
-        height = max(1.0, y2 - y1)
-        pad_x = max(24, int(round(width * 0.18)))
-        pad_top = max(24, int(round(height * 0.14)))
-        pad_bottom = max(80, int(round(height * 0.38)))
-        left = max(0, int(round(x1 - pad_x)))
-        top = max(0, int(round(y1 - pad_top)))
-        right = min(frame_width, int(round(x2 + pad_x)))
-        bottom = min(frame_height, int(round(y2 + pad_bottom)))
-        if right - left < 80 or bottom - top < 80:
-            return None
-        return left, top, right, bottom
-
-    def _crop_table_roi_for_autoclick(self, frame_bgr, result) -> Tuple[Any, Optional[Tuple[int, int, int, int]]]:
-        bbox = self._infer_table_roi_bbox(frame_bgr, result)
-        if bbox is None:
-            return frame_bgr, None
-        x1, y1, x2, y2 = bbox
-        try:
-            roi = frame_bgr[y1:y2, x1:x2]
-        except Exception:
-            return frame_bgr, None
-        if roi is None or not hasattr(roi, "shape") or getattr(roi, "size", 0) == 0:
-            return frame_bgr, None
-        return roi.copy(), bbox
 
     def _auto_click_result_to_dict(self, auto_click_result) -> Dict[str, Any]:
         if auto_click_result is None:
@@ -2193,18 +2178,7 @@ class IntegratedRunner:
 
         if self.auto_click_runtime is not None:
             try:
-                frame_for_autoclick_full = self._normalize_frame_for_autoclick(frame.image)
-                frame_for_autoclick, table_roi_bbox = self._crop_table_roi_for_autoclick(frame_for_autoclick_full, result)
-                frame_width = 0
-                frame_height = 0
-                monitor_left = 0
-                monitor_top = 0
-                if table_roi_bbox is not None:
-                    monitor_left = int(table_roi_bbox[0])
-                    monitor_top = int(table_roi_bbox[1])
-                if frame_for_autoclick is not None and hasattr(frame_for_autoclick, "shape") and len(frame_for_autoclick.shape) >= 2:
-                    frame_height = int(frame_for_autoclick.shape[0])
-                    frame_width = int(frame_for_autoclick.shape[1])
+                frame_for_autoclick, monitor_left, monitor_top, frame_width, frame_height = self._crop_table_roi_for_autoclick(frame.image, result)
                 active_hero_present = bool(getattr(result.analysis, "active_hero_found", False))
                 autoclick_decision, autoclick_reason = self._select_autoclick_decision(
                     live_decision=decision,
