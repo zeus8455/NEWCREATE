@@ -275,6 +275,30 @@ class AutoClickPlan:
 
 
 @dataclass(slots=True)
+class AutoClickSlotState:
+    state: str = STATE_IDLE
+    wait_started_at: Optional[float] = None
+    error_started_at: Optional[float] = None
+    post_click_until: float = 0.0
+    last_cycle_key: Optional[str] = None
+    last_hand_id: Optional[str] = None
+    last_executed_decision_id: Optional[str] = None
+    last_executed_solver_fingerprint: Optional[str] = None
+    last_executed_source_frame_id: Optional[str] = None
+    last_executed_hand_id: Optional[str] = None
+    last_executed_street: Optional[str] = None
+    last_executed_plan_name: Optional[str] = None
+    last_executed_at: Optional[float] = None
+    last_executed_decision_guard: Optional[str] = None
+    locked_decision_id: Optional[str] = None
+    locked_decision_guard: Optional[str] = None
+    last_plan_name: Optional[str] = None
+    last_normalized_action: Optional[str] = None
+    last_raw_action: Optional[str] = None
+    last_click_at: Optional[float] = None
+
+
+@dataclass(slots=True)
 class AutoClickConfig:
     enabled: bool = True
     enable_idle_movement: bool = True
@@ -464,6 +488,9 @@ class AutoClickRuntime:
                 LOGGER.exception("%s failed to initialize button detector", self.config.log_prefix)
                 self.button_detector = None
 
+        self.slot_states: Dict[str, AutoClickSlotState] = {}
+        self._active_slot_key: str = "single"
+
         self.state = STATE_IDLE
         self.wait_started_at: Optional[float] = None
         self.error_started_at: Optional[float] = None
@@ -496,6 +523,71 @@ class AutoClickRuntime:
             except Exception:
                 LOGGER.exception("%s failed to initialize Windows mouse backend", self.config.log_prefix)
         return NoopMouseBackend()
+
+    def _slot_key_from_snapshot(self, snapshot: Optional[AutoClickSnapshot]) -> str:
+        if snapshot is None:
+            return "single"
+        raw_slot = getattr(snapshot, "slot_id", None)
+        if raw_slot not in (None, ""):
+            return str(raw_slot).strip() or "single"
+        return "single"
+
+    def _copy_current_to_slot_state(self, target: AutoClickSlotState) -> None:
+        target.state = self.state
+        target.wait_started_at = self.wait_started_at
+        target.error_started_at = self.error_started_at
+        target.post_click_until = self.post_click_until
+        target.last_cycle_key = self.last_cycle_key
+        target.last_hand_id = self.last_hand_id
+        target.last_executed_decision_id = self.last_executed_decision_id
+        target.last_executed_solver_fingerprint = self.last_executed_solver_fingerprint
+        target.last_executed_source_frame_id = self.last_executed_source_frame_id
+        target.last_executed_hand_id = self.last_executed_hand_id
+        target.last_executed_street = self.last_executed_street
+        target.last_executed_plan_name = self.last_executed_plan_name
+        target.last_executed_at = self.last_executed_at
+        target.last_executed_decision_guard = self.last_executed_decision_guard
+        target.locked_decision_id = self.locked_decision_id
+        target.locked_decision_guard = self.locked_decision_guard
+        target.last_plan_name = self.last_plan_name
+        target.last_normalized_action = self.last_normalized_action
+        target.last_raw_action = self.last_raw_action
+        target.last_click_at = self.last_click_at
+
+    def _load_slot_state_to_current(self, source: AutoClickSlotState) -> None:
+        self.state = source.state
+        self.wait_started_at = source.wait_started_at
+        self.error_started_at = source.error_started_at
+        self.post_click_until = source.post_click_until
+        self.last_cycle_key = source.last_cycle_key
+        self.last_hand_id = source.last_hand_id
+        self.last_executed_decision_id = source.last_executed_decision_id
+        self.last_executed_solver_fingerprint = source.last_executed_solver_fingerprint
+        self.last_executed_source_frame_id = source.last_executed_source_frame_id
+        self.last_executed_hand_id = source.last_executed_hand_id
+        self.last_executed_street = source.last_executed_street
+        self.last_executed_plan_name = source.last_executed_plan_name
+        self.last_executed_at = source.last_executed_at
+        self.last_executed_decision_guard = source.last_executed_decision_guard
+        self.locked_decision_id = source.locked_decision_id
+        self.locked_decision_guard = source.locked_decision_guard
+        self.last_plan_name = source.last_plan_name
+        self.last_normalized_action = source.last_normalized_action
+        self.last_raw_action = source.last_raw_action
+        self.last_click_at = source.last_click_at
+
+    def _sync_active_slot_state(self) -> None:
+        target = self.slot_states.setdefault(self._active_slot_key, AutoClickSlotState())
+        self._copy_current_to_slot_state(target)
+
+    def _activate_slot_state(self, slot_key: str) -> None:
+        normalized = str(slot_key or "single").strip() or "single"
+        if self._active_slot_key != normalized:
+            self._sync_active_slot_state()
+            self._active_slot_key = normalized
+        source = self.slot_states.setdefault(self._active_slot_key, AutoClickSlotState())
+        self._load_slot_state_to_current(source)
+
 
     def _extract_launcher_decision_action(self, decision: Optional[HeroDecision]) -> str:
         if decision is None:
@@ -688,8 +780,9 @@ class AutoClickRuntime:
     ) -> AutoClickResult:
         now = time.monotonic()
         events: List[AutoClickEvent] = []
+        self._activate_slot_state(self._slot_key_from_snapshot(snapshot))
         if not self.config.enabled:
-            return AutoClickResult(state=self.state, events=events)
+            return self._finalize(AutoClickResult(state=self.state, events=events))
 
         cycle_key = self._cycle_key(snapshot)
         if self._should_reset_cycle(snapshot, cycle_key):
@@ -957,6 +1050,9 @@ class AutoClickRuntime:
         self.last_normalized_action = None
         self.last_raw_action = None
         self.last_click_at = None
+        self.slot_states.clear()
+        self._active_slot_key = "single"
+        self._sync_active_slot_state()
 
     def get_recent_events(self) -> List[AutoClickEvent]:
         return list(self.recent_events)
@@ -1156,6 +1252,7 @@ class AutoClickRuntime:
 
     def _finalize(self, result: AutoClickResult) -> AutoClickResult:
         self._append_events(result.events)
+        self._sync_active_slot_state()
         return result
 
     def _result_from_state(self, plan: AutoClickPlan, executed: bool, events: List[AutoClickEvent], *, locked: bool) -> AutoClickResult:
