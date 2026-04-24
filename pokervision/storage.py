@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import cv2
 import numpy as np
@@ -12,27 +13,105 @@ from .config import Settings
 from .models import PipelineArtifacts
 
 
+SLOT_ROOT_DIRNAME = "tables"
+DEFAULT_SLOT_ID = "table_01"
+
+
 def _hand_number_suffix(hand_id: str) -> str:
     raw = str(hand_id or "").strip()
     tail = raw.split("_")[-1] if raw else ""
     return tail or raw or "unknown"
 
 
+def normalize_slot_id(slot_id: object) -> str:
+    raw = str(slot_id or "").strip()
+    if not raw:
+        raise ValueError("slot_id cannot be empty")
+    if raw.startswith("table_"):
+        suffix = raw.split("_", 1)[1]
+    elif raw.isdigit():
+        suffix = raw
+    else:
+        raise ValueError(f"Unsupported slot_id format: {slot_id!r}")
+    try:
+        index = int(suffix)
+    except Exception as exc:
+        raise ValueError(f"Unsupported slot_id format: {slot_id!r}") from exc
+    if index < 1:
+        raise ValueError(f"slot_id index must be >= 1, got: {slot_id!r}")
+    return f"table_{index:02d}"
+
+
+@dataclass(frozen=True, slots=True)
+class SlotPaths:
+    slot_id: str
+    root_dir: Path
+    hands_dir: Path
+    temp_dir: Path
+    render_dir: Path
+    logs_dir: Path
+
+    def as_dict(self) -> dict[str, Path]:
+        return {
+            "root_dir": self.root_dir,
+            "hands_dir": self.hands_dir,
+            "temp_dir": self.temp_dir,
+            "render_dir": self.render_dir,
+            "logs_dir": self.logs_dir,
+        }
+
+
+def resolve_slot_paths(root_dir: Path | str, slot_id: object) -> SlotPaths:
+    base_root = Path(root_dir).expanduser().resolve()
+    resolved_slot_id = normalize_slot_id(slot_id)
+    slot_root = base_root / SLOT_ROOT_DIRNAME / resolved_slot_id
+    return SlotPaths(
+        slot_id=resolved_slot_id,
+        root_dir=slot_root,
+        hands_dir=slot_root / "hands",
+        temp_dir=slot_root / "temp",
+        render_dir=slot_root / "render",
+        logs_dir=slot_root / "logs",
+    )
+
+
 class StorageManager:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, default_slot_id: str = DEFAULT_SLOT_ID):
         self.settings = settings
+        self.root_dir = Path(self.settings.root_dir).expanduser().resolve()
+        self.tables_root_dir = self.root_dir / SLOT_ROOT_DIRNAME
+        self.default_slot_id = normalize_slot_id(default_slot_id)
+        self.default_slot_paths = resolve_slot_paths(self.root_dir, self.default_slot_id)
         self._ensure_root_structure()
 
+    def resolve_slot_paths(self, slot_id: object) -> SlotPaths:
+        return resolve_slot_paths(self.root_dir, slot_id)
+
+    def ensure_slot_structure(self, slot_id: object) -> SlotPaths:
+        slot_paths = self.resolve_slot_paths(slot_id)
+        slot_paths.root_dir.mkdir(parents=True, exist_ok=True)
+        slot_paths.hands_dir.mkdir(parents=True, exist_ok=True)
+        slot_paths.logs_dir.mkdir(parents=True, exist_ok=True)
+        slot_paths.render_dir.mkdir(parents=True, exist_ok=True)
+        if slot_paths.temp_dir.exists() and not self.settings.keep_temp_on_exit:
+            shutil.rmtree(slot_paths.temp_dir, ignore_errors=True)
+        slot_paths.temp_dir.mkdir(parents=True, exist_ok=True)
+        return slot_paths
+
+    def ensure_all_slot_structures(self, slot_ids: Iterable[object]) -> dict[str, SlotPaths]:
+        created: dict[str, SlotPaths] = {}
+        for slot_id in slot_ids:
+            slot_paths = self.ensure_slot_structure(slot_id)
+            created[slot_paths.slot_id] = slot_paths
+        return created
+
     def _ensure_root_structure(self) -> None:
-        self.settings.root_dir.mkdir(parents=True, exist_ok=True)
-        self.settings.hands_dir().mkdir(parents=True, exist_ok=True)
-        self.settings.logs_dir().mkdir(parents=True, exist_ok=True)
-        if self.settings.temp_dir().exists() and not self.settings.keep_temp_on_exit:
-            shutil.rmtree(self.settings.temp_dir(), ignore_errors=True)
-        self.settings.temp_dir().mkdir(parents=True, exist_ok=True)
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+        self.tables_root_dir.mkdir(parents=True, exist_ok=True)
+        self.ensure_slot_structure(self.default_slot_id)
 
     def hand_dir(self, hand_id: str) -> Path:
-        path = self.settings.hands_dir() / hand_id
+        path = self.default_slot_paths.hands_dir / hand_id
         for sub in [
             path / "raw_frames",
             path / "overlays",
@@ -47,7 +126,7 @@ class StorageManager:
         return path
 
     def failure_dir(self, stage: str, frame_id: str) -> Path:
-        path = self.settings.temp_dir() / "failed_frames" / stage / frame_id
+        path = self.default_slot_paths.temp_dir / "failed_frames" / stage / frame_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 

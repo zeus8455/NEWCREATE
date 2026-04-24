@@ -49,7 +49,7 @@ from pokervision.config import get_default_settings
 from pokervision.detectors import MockDetectorBackend, YoloDetectorBackend
 from pokervision.hand_state import HandStateManager
 from pokervision.pipeline import PokerVisionPipeline
-from pokervision.storage import StorageManager
+from pokervision.storage import StorageManager, normalize_slot_id as normalize_storage_slot_id, resolve_slot_paths as build_storage_slot_paths
 from pokervision.ui_bridge import SharedState
 from pokervision.visualizer import DebugMonitorWindow
 from pokervision.card_renderer import render_card, render_card_back
@@ -99,6 +99,46 @@ DISPLAY_SLOTS = {
     5: [(0.50, 0.84), (0.16, 0.68), (0.18, 0.28), (0.50, 0.14), (0.84, 0.30)],
     6: [(0.50, 0.84), (0.16, 0.70), (0.18, 0.30), (0.50, 0.13), (0.82, 0.30), (0.84, 0.70)],
 }
+
+
+REGIONS: List[Tuple[int, int, int, int]] = [
+    (63, 93, 875, 681),     # table_01
+    (875, 93, 1686, 681),   # table_02
+    (1686, 93, 2498, 681),  # table_03
+    (63, 681, 875, 1269),   # table_04
+    (875, 681, 1686, 1269), # table_05
+    (1686, 681, 2498, 1269) # table_06
+]
+SLOT_IDS: Tuple[str, ...] = tuple(f"table_{index:02d}" for index in range(1, len(REGIONS) + 1))
+SLOT_BBOX_BY_ID: Dict[str, Tuple[int, int, int, int]] = {
+    slot_id: REGIONS[index]
+    for index, slot_id in enumerate(SLOT_IDS)
+}
+
+
+def get_slot_bbox(slot_id: str) -> Tuple[int, int, int, int]:
+    resolved_slot_id = normalize_storage_slot_id(slot_id)
+    bbox = SLOT_BBOX_BY_ID.get(resolved_slot_id)
+    if bbox is None:
+        raise KeyError(f"Unknown slot_id: {slot_id}")
+    return bbox
+
+
+def iter_slots_round_robin(start_slot_id: Optional[str] = None) -> Tuple[str, ...]:
+    order = list(SLOT_IDS)
+    if start_slot_id is None:
+        return tuple(order)
+    resolved_slot_id = normalize_storage_slot_id(start_slot_id)
+    if resolved_slot_id not in SLOT_BBOX_BY_ID:
+        raise KeyError(f"Unknown slot_id: {start_slot_id}")
+    start_index = order.index(resolved_slot_id)
+    return tuple(order[start_index:] + order[:start_index])
+
+
+def resolve_slot_paths(slot_id: str) -> Dict[str, Path]:
+    base_root = Path(get_default_settings().root_dir).expanduser().resolve()
+    slot_paths = build_storage_slot_paths(base_root, slot_id)
+    return slot_paths.as_dict()
 
 GENERIC_WIDE_RANGE = (
     "22+ A2s+ K2s+ Q2s+ J2s+ T2s+ 92s+ 82s+ 72s+ 62s+ 52s+ 42s+ 32s "
@@ -1795,6 +1835,9 @@ class IntegratedRunner:
         self.source = MockFrameSource(*self.settings.mock_table_size) if args.mock else ScreenFrameSource(self.settings.monitor_index)
         self.detector = MockDetectorBackend(self.settings) if args.mock else YoloDetectorBackend(self.settings)
         self.storage = StorageManager(self.settings)
+        self.slot_order: Tuple[str, ...] = iter_slots_round_robin()
+        self.slot_bboxes: Dict[str, Tuple[int, int, int, int]] = {slot_id: get_slot_bbox(slot_id) for slot_id in self.slot_order}
+        self.slot_paths_by_id: Dict[str, Dict[str, Path]] = self._bootstrap_static_slots()
         self.hand_manager = HandStateManager(
             self.settings.schema_version,
             self.settings.hand_stale_timeout_sec,
@@ -1804,6 +1847,23 @@ class IntegratedRunner:
         self.auto_click_runtime = self._build_auto_click_runtime(args)
         self._auto_click_cycle_started_at: Optional[float] = None
         self._auto_click_cycle_key: Optional[str] = None
+
+    def resolve_slot_paths(self, slot_id: str) -> Dict[str, Path]:
+        slot_paths = self.storage.resolve_slot_paths(slot_id)
+        return slot_paths.as_dict()
+
+    def _bootstrap_static_slots(self) -> Dict[str, Dict[str, Path]]:
+        print("[MultiTableBootstrap] initializing static slot registry")
+        bootstrapped: Dict[str, Dict[str, Path]] = {}
+        for slot_id in self.slot_order:
+            slot_paths = self.storage.ensure_slot_structure(slot_id)
+            bootstrapped[slot_id] = slot_paths.as_dict()
+            print(
+                f"[MultiTableBootstrap] slot={slot_id} "
+                f"bbox={self.slot_bboxes[slot_id]} "
+                f"root={slot_paths.root_dir}"
+            )
+        return bootstrapped
 
     def _build_auto_click_runtime(self, args):
         if not getattr(args, "autoclick", False):
