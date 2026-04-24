@@ -1,0 +1,1164 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, fields, is_dataclass
+from typing import Any, Optional
+
+import copy
+import cv2
+import numpy as np
+
+from .action_inference import infer_actions
+from .amount_normalization import normalize_amount_contributions
+from .config import Settings
+from .detectors import (
+    build_board_crop,
+    build_hero_crop,
+    build_player_state_crop,
+    build_table_amount_crop,
+)
+from .hand_state import HandStateManager, MATCH_STRONG, MATCH_WEAK
+from .json_manager import save_hand_json
+from .models import BBox, Detection, FrameAnalysis, HandState
+from .render_state import build_render_state
+from .solver_bridge import (
+    build_recommendation as build_solver_recommendation,
+    build_solver_contract_preview,
+)
+from .storage import StorageManager
+from .table_amount_logic import build_table_amount_state
+from .table_logic import assign_positions, determine_hero_position
+from .validators import (
+    determine_street,
+    validate_board_cards,
+    validate_hero_cards,
+    validate_player_state,
+    validate_structure,
+)
+
+
+@dataclass(slots=True)
+class PipelineResult:
+    analysis: FrameAnalysis
+    hand: Optional[HandState]
+    render_state: Optional[dict]
+
+
+def _draw_detections(image: np.ndarray, detections: list[Detection], color=(0, 255, 255)) -> np.ndarray:
+    out = image.copy()
+    for det in detections:
+        x1, y1, x2, y2 = map(int, [det.bbox.x1, det.bbox.y1, det.bbox.x2, det.bbox.y2])
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(out, det.label, (x1, max(12, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+    return out
+
+
+def _region_key(det: Detection) -> str:
+    bbox = det.bbox
+    return f"{det.label}@{round(bbox.x1, 1)}:{round(bbox.y1, 1)}:{round(bbox.x2, 1)}:{round(bbox.y2, 1)}"
+
+
+def _localize(global_detections: list[Detection], origin: tuple[int, int]) -> list[Detection]:
+    ox, oy = origin
+    localized: list[Detection] = []
+    for d in global_detections:
+        localized.append(
+            Detection(
+                d.label,
+                BBox(d.bbox.x1 - ox, d.bbox.y1 - oy, d.bbox.x2 - ox, d.bbox.y2 - oy),
+                d.confidence,
+            )
+        )
+    return localized
+
+
+def _expand_bbox_for_retry(
+    bbox: BBox,
+    image: np.ndarray,
+    *,
+    pad_x: float,
+    pad_top: float,
+    pad_bottom: float,
+) -> BBox:
+    height, width = image.shape[:2]
+    return BBox(
+        x1=max(0.0, float(bbox.x1) - float(pad_x)),
+        y1=max(0.0, float(bbox.y1) - float(pad_top)),
+        x2=min(float(width), float(bbox.x2) + float(pad_x)),
+        y2=min(float(height), float(bbox.y2) + float(pad_bottom)),
+    )
+
+
+def _safe_jsonable(value: Any, *, depth: int = 0) -> Any:
+    if depth > 5:
+        return repr(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _safe_jsonable(v, depth=depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_jsonable(v, depth=depth + 1) for v in value]
+    if is_dataclass(value):
+        return {f.name: _safe_jsonable(getattr(value, f.name), depth=depth + 1) for f in fields(value)}
+    if hasattr(value, "__dict__"):
+        return {
+            str(k): _safe_jsonable(v, depth=depth + 1)
+            for k, v in vars(value).items()
+            if not str(k).startswith("_")
+        }
+    return repr(value)
+
+
+
+
+def _build_solver_context_preview_fallback(analysis: FrameAnalysis, hand: HandState) -> dict[str, Any]:
+    action_state = hand.action_state or {}
+    preview: dict[str, Any] = {
+        "street": analysis.street,
+        "hero_position": hand.hero_position,
+        "hero_cards": list(hand.hero_cards),
+        "board_cards": list(hand.board_cards),
+        "player_count": hand.player_count,
+        "table_format": hand.table_format,
+        "node_type_preview": action_state.get("node_type_preview"),
+        "hero_context_preview": _safe_jsonable(action_state.get("hero_context_preview", {})),
+        "action_history": _safe_jsonable(action_state.get("action_history", [])),
+    }
+    if analysis.street != "preflop":
+        amount_norm = hand.amount_normalization or {}
+        active_positions = [
+            pos
+            for pos, state in (hand.player_states or {}).items()
+            if pos != hand.hero_position and not bool(state.get("is_fold", False))
+        ]
+        preview.update(
+            {
+                "pot_before_hero": amount_norm.get("total_pot_bb"),
+                "villain_positions": active_positions,
+            }
+        )
+    return preview
+
+
+def _build_advisor_input_fallback(analysis: FrameAnalysis, hand: HandState, solver_context: dict[str, Any]) -> dict[str, Any]:
+    action_state = hand.action_state or {}
+    amount_norm = hand.amount_normalization or {}
+    if analysis.street == "preflop":
+        hero_preview = action_state.get("hero_context_preview", {}) or {}
+        return {
+            "context_type": "PreflopContext",
+            "hero_hand": list(hand.hero_cards),
+            "hero_pos": hand.hero_position,
+            "node_type": action_state.get("node_type_preview"),
+            "opener_pos": hero_preview.get("opener_pos") or action_state.get("opener_pos"),
+            "three_bettor_pos": hero_preview.get("three_bettor_pos") or action_state.get("three_bettor_pos"),
+            "four_bettor_pos": hero_preview.get("four_bettor_pos") or action_state.get("four_bettor_pos"),
+            "limpers": hero_preview.get("limpers", action_state.get("limpers", 0)),
+            "callers": hero_preview.get("callers", action_state.get("callers_after_open", 0)),
+            "action_history": _safe_jsonable(action_state.get("action_history", [])),
+            "meta": _safe_jsonable(hero_preview.get("meta", {})),
+        }
+    return {
+        "context_type": "PostflopContext",
+        "hero_hand": list(hand.hero_cards),
+        "board": list(hand.board_cards),
+        "pot_before_hero": amount_norm.get("total_pot_bb"),
+        "to_call": solver_context.get("to_call", 0.0),
+        "effective_stack": solver_context.get("effective_stack"),
+        "hero_position": hand.hero_position,
+        "villain_positions": list(solver_context.get("villain_positions", [])),
+        "street": analysis.street,
+        "player_count": hand.player_count,
+        "line_context": _safe_jsonable(action_state.get("line_context", {})),
+    }
+
+
+def _get_solver_input_payload(payload: Any, solver_context: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("solver_input"), dict):
+        return _safe_jsonable(payload.get("solver_input"))
+    return dict(solver_context)
+
+
+def _get_solver_output_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("solver_output"), dict):
+        return _safe_jsonable(payload.get("solver_output"))
+    if isinstance(payload, dict) and payload.get("result") is not None:
+        return {
+            "result": _safe_jsonable(payload.get("result")),
+            "context_type": payload.get("context_type"),
+        }
+    return {}
+
+
+def _get_solver_context_payload(analysis: FrameAnalysis, hand: HandState, payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("solver_context"), dict):
+        return _safe_jsonable(payload.get("solver_context"))
+    return _build_solver_context_preview_fallback(analysis, hand)
+
+
+def _get_advisor_input_payload(analysis: FrameAnalysis, hand: HandState, payload: Any, solver_context: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("advisor_input"), dict):
+        return _safe_jsonable(payload.get("advisor_input"))
+    return _build_advisor_input_fallback(analysis, hand, solver_context)
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _summarize_range_source_payload(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"name": None, "source_type": None, "combo_count": 0, "total_weight": 0.0}
+    weighted = item.get("weighted_combos") or []
+    total_weight = 0.0
+    combo_count = 0
+    for entry in weighted:
+        combo_count += 1
+        weight = None
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            weight = _coerce_float(entry[1])
+        elif isinstance(entry, dict):
+            weight = _coerce_float(entry.get("weight"))
+        total_weight += float(weight or 0.0)
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    return {
+        "name": item.get("name"),
+        "source_type": item.get("source_type"),
+        "combo_count": combo_count,
+        "total_weight": total_weight,
+        "resolved_street": meta.get("resolved_street") or meta.get("street"),
+        "villain_pos": meta.get("villain_pos"),
+        "villain_action": meta.get("villain_action"),
+        "range_build_path": meta.get("range_build_path"),
+        "range_contract": meta.get("range_contract"),
+    }
+
+
+def _extract_runtime_range_state(payload: Any, advisor_input: dict[str, Any], solver_input: dict[str, Any], solver_output: dict[str, Any]) -> Optional[dict[str, Any]]:
+    candidates: list[Any] = []
+    if isinstance(solver_output, dict):
+        candidates.append(solver_output.get("runtime_range_state"))
+    if isinstance(solver_input, dict):
+        candidates.append(solver_input.get("runtime_range_state"))
+    if isinstance(advisor_input, dict):
+        candidates.append(advisor_input.get("runtime_range_state"))
+    if isinstance(payload, dict):
+        candidates.append(payload.get("runtime_range_state"))
+        for key in ("solver_output", "solver_input", "advisor_input"):
+            inner = payload.get(key)
+            if isinstance(inner, dict):
+                candidates.append(inner.get("runtime_range_state"))
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return _safe_jsonable(candidate)
+    return None
+
+
+def _build_canonical_postflop_range_trace(runtime_state: Optional[dict[str, Any]], warnings: list[str]) -> Optional[dict[str, Any]]:
+    if not isinstance(runtime_state, dict) or not runtime_state:
+        return None
+    villain_sources = runtime_state.get("villain_sources") or []
+    villain_reports = runtime_state.get("villain_range_reports") or runtime_state.get("villain_reports") or []
+    trace: dict[str, Any] = {
+        "range_build_mode": runtime_state.get("range_build_mode"),
+        "requested_range_build_mode": runtime_state.get("requested_range_build_mode"),
+        "range_trace_expected": runtime_state.get("range_trace_expected"),
+        "payload_kind": runtime_state.get("payload_kind"),
+        "range_contract": runtime_state.get("range_contract"),
+        "resolved_street": runtime_state.get("resolved_street"),
+        "board": runtime_state.get("board"),
+        "board_runout": runtime_state.get("board_runout"),
+        "villain_sources_summary": [
+            _summarize_range_source_payload(item)
+            for item in villain_sources
+            if isinstance(item, dict)
+        ],
+        "villain_range_reports": _safe_jsonable(villain_reports),
+    }
+    warning_list = runtime_state.get("warnings") or warnings
+    if warning_list:
+        trace["warnings"] = [str(item) for item in warning_list if str(item)]
+    return {k: v for k, v in trace.items() if v not in (None, [], {})}
+
+
+def _inject_canonical_postflop_range_trace(target: dict[str, Any], trace: Optional[dict[str, Any]]) -> dict[str, Any]:
+    updated = dict(target)
+    if trace:
+        updated["postflop_range_trace"] = _safe_jsonable(trace)
+    return updated
+
+def _build_engine_result_from_payload(payload: Any, status: str) -> dict[str, Any]:
+    result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
+    if result_obj is None:
+        return {"status": status}
+    return {
+        "status": status,
+        "decision_type": type(result_obj).__name__,
+        "street": getattr(result_obj, "street", None),
+        "engine_action": getattr(result_obj, "engine_action", None),
+        "amount_to": getattr(result_obj, "amount_to", None),
+        "size_pct": getattr(result_obj, "size_pct", None),
+        "reason": getattr(result_obj, "reason", None),
+        "confidence": getattr(result_obj, "confidence", None),
+        "source": getattr(result_obj, "source", None),
+        "actor_name": getattr(result_obj, "actor_name", None),
+        "actor_pos": getattr(result_obj, "actor_pos", None),
+    }
+
+
+def _build_hero_decision_debug_from_payload(payload: Any, status: str, errors: list[str], warnings: list[str]) -> dict[str, Any]:
+    result_obj = payload.get("result") if isinstance(payload, dict) and "result" in payload else payload
+    debug = {
+        "status": status,
+        "type": type(result_obj).__name__ if result_obj is not None else "NoneType",
+        "raw_repr": repr(result_obj) if result_obj is not None else "",
+        "source": getattr(result_obj, "source", None) if result_obj is not None else None,
+        "confidence": getattr(result_obj, "confidence", None) if result_obj is not None else None,
+        "reason": getattr(result_obj, "reason", None) if result_obj is not None else None,
+        "preflop": _safe_jsonable(getattr(result_obj, "preflop", None)) if result_obj is not None else None,
+        "postflop": _safe_jsonable(getattr(result_obj, "postflop", None)) if result_obj is not None else None,
+    }
+    if warnings:
+        debug["warnings"] = list(warnings)
+    if errors:
+        debug["errors"] = list(errors)
+    return debug
+
+
+def _apply_solver_payload(analysis: FrameAnalysis, hand: HandState, payload: Any) -> None:
+    """Populate the canonical solver contract on analysis/hand.
+
+    CRITICAL INVARIANT:
+    Solver output must live in one official location only: the dedicated solver
+    fields on HandState/RenderState. Do not mirror the same payload back into
+    processing_summary or action_annotations under legacy ad-hoc keys such as
+    ``solver_bridge``. That duplication creates two competing JSON contracts and
+    makes old noise look like fresh solver state.
+    """
+    status = "ok"
+    errors: list[str] = []
+    warnings: list[str] = []
+    if isinstance(payload, dict):
+        status = str(payload.get("status") or "ok")
+        if payload.get("errors"):
+            errors.extend([str(item) for item in payload.get("errors", [])])
+        if payload.get("error"):
+            errors.append(str(payload.get("error")))
+    elif payload is None:
+        status = "not_run"
+
+    solver_context = _get_solver_context_payload(analysis, hand, payload)
+    solver_input = _get_solver_input_payload(payload, solver_context)
+    solver_output = _get_solver_output_payload(payload)
+    advisor_input = _get_advisor_input_payload(analysis, hand, payload, solver_context)
+    if isinstance(payload, dict) and payload.get("warnings"):
+        # CRITICAL INVARIANT:
+        # Solver warnings are diagnostic notes from a successful or recovered path
+        # (for example, when the bridge skips a line-builder that requires a full
+        # 5-card runout and transparently falls back to a safer projection). They
+        # must stay visible in JSON/debug output, but they must NOT be promoted to
+        # solver_errors, otherwise harmless fallback notes look like real solver failures.
+        warnings.extend([str(item) for item in payload.get("warnings", [])])
+    runtime_range_state = _extract_runtime_range_state(payload, advisor_input, solver_input, solver_output)
+    postflop_range_trace = _build_canonical_postflop_range_trace(runtime_range_state, warnings)
+    advisor_input = _inject_canonical_postflop_range_trace(advisor_input, postflop_range_trace)
+    solver_input = _inject_canonical_postflop_range_trace(solver_input, postflop_range_trace)
+    solver_output = _inject_canonical_postflop_range_trace(solver_output, postflop_range_trace)
+    engine_result = _build_engine_result_from_payload(payload, status)
+    hero_debug = _build_hero_decision_debug_from_payload(payload, status, errors, warnings)
+    if postflop_range_trace:
+        hero_debug["postflop_range_trace"] = _safe_jsonable(postflop_range_trace)
+    analysis.solver_context_preview = dict(solver_context)
+    analysis.solver_result = dict(engine_result)
+    analysis.solver_status = status
+    analysis.solver_warnings = list(warnings)
+    analysis.solver_result_reused = False
+    analysis.solver_reuse_reason = None
+
+    hand.solver_context = dict(solver_context)
+    hand.advisor_input = dict(advisor_input)
+    hand.solver_input = dict(solver_input)
+    hand.solver_output = dict(solver_output)
+    hand.engine_result = dict(engine_result)
+    hand.solver_status = status
+    hand.solver_warnings = list(warnings)
+    hand.solver_errors = list(errors)
+    hand.hero_decision_debug = dict(hero_debug)
+
+    return None
+
+
+def _extract_solver_fingerprint(preview: Any) -> str:
+    if isinstance(preview, dict):
+        return str(preview.get("fingerprint") or "")
+    return ""
+
+
+def _extract_solver_bridge_processing_summary(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    processing_summary = payload.get("processing_summary")
+    if not isinstance(processing_summary, dict):
+        return {}
+    solver_bridge = processing_summary.get("solver_bridge")
+    if not isinstance(solver_bridge, dict):
+        return {}
+    return _safe_jsonable(solver_bridge)
+
+
+def _write_solver_bridge_processing_summary(
+    analysis: FrameAnalysis,
+    hand: HandState,
+    *,
+    preview_payload: Any = None,
+    recommendation_payload: Any = None,
+    reused: bool = False,
+) -> None:
+    preview_summary = _extract_solver_bridge_processing_summary(preview_payload)
+    recommendation_summary = _extract_solver_bridge_processing_summary(recommendation_payload)
+    merged: dict[str, Any] = {}
+    if preview_summary:
+        merged["preview"] = preview_summary
+    if recommendation_summary:
+        merged["recommendation"] = recommendation_summary
+    elif reused:
+        merged["recommendation"] = {
+            "phase": "recommendation",
+            "status": "reused_previous_solver_result",
+            "reused": True,
+            "timings_ms": {
+                "build_solver_contract_preview": 0.0,
+                "build_villain_postflop_range_sources": 0.0,
+                "solve_hero_postflop": 0.0,
+                "runtime_range_state_serialization": 0.0,
+                "fingerprint_build": 0.0,
+            },
+            "total_profiled_ms": 0.0,
+        }
+    if not merged:
+        analysis.processing_summary.pop("solver_bridge", None)
+        hand.processing_summary.pop("solver_bridge", None)
+        return
+    if reused and isinstance(merged.get("recommendation"), dict):
+        merged["recommendation"]["reused"] = True
+    analysis.processing_summary["solver_bridge"] = copy.deepcopy(merged)
+    hand.processing_summary["solver_bridge"] = copy.deepcopy(merged)
+
+
+def _ensure_solver_summary_fields(hand: HandState) -> None:
+    summary = hand.processing_summary
+    summary.setdefault("solver_runs", 0)
+    summary.setdefault("solver_reuse_hits", 0)
+
+
+def _mark_solver_run_attempt(hand: HandState) -> None:
+    _ensure_solver_summary_fields(hand)
+    hand.processing_summary["solver_runs"] += 1
+
+
+def _mark_solver_reuse_hit(hand: HandState) -> None:
+    _ensure_solver_summary_fields(hand)
+    hand.processing_summary["solver_reuse_hits"] += 1
+
+
+def _failure_reason_for_stage(stage: str) -> str:
+    reasons = {
+        "structure": "ActiveHero найден, но структура стола не прошла валидацию, поэтому новый hand/render state не был построен.",
+        "street": "ActiveHero найден, но улица не была определена корректно, поэтому pipeline остановился до сборки нового hand/render state.",
+        "hero_cards": "ActiveHero найден, но HERO cards не прошли валидацию, поэтому новая раздача не дошла до hand/render state.",
+        "board_marker": "ActiveHero найден, но маркер улицы на борде не был найден, поэтому pipeline не смог построить board state и render state.",
+        "board_cards": "ActiveHero найден, но board cards не прошли валидацию, поэтому pipeline остановился до сборки нового render state.",
+    }
+    return reasons.get(stage, "ActiveHero найден, но текущий кадр завершился ошибкой до построения нового hand/render state.")
+
+
+def _build_failed_frame_payload(
+    analysis: FrameAnalysis,
+    hand: Optional[HandState],
+    *,
+    stage: str,
+    message: str,
+    artifacts: Any,
+) -> dict[str, Any]:
+    previous_render = hand.render_state_snapshot if hand is not None and isinstance(hand.render_state_snapshot, dict) else {}
+    return {
+        "frame_id": analysis.frame_id,
+        "timestamp": analysis.timestamp,
+        "active_hero_found": bool(analysis.active_hero_found),
+        "error_stage": stage,
+        "error_message": message,
+        "failure_reason": _failure_reason_for_stage(stage),
+        "hand_id": hand.hand_id if hand is not None else None,
+        "hand_status": hand.status if hand is not None else None,
+        "previous_render_hand_id": hand.hand_id if hand is not None else None,
+        "previous_render_source_frame_id": previous_render.get("source_frame_id"),
+        "previous_render_updated_at": previous_render.get("updated_at"),
+        "previous_render_street": previous_render.get("street"),
+        "previous_render_hero_cards": list(previous_render.get("hero_cards", []) or []),
+        "street": analysis.street,
+        "player_count": analysis.player_count,
+        "table_format": analysis.table_format,
+        "hero_position": analysis.hero_position,
+        "hero_cards": list(analysis.hero_cards),
+        "board_cards": list(analysis.board_cards),
+        "occupied_positions": list(analysis.occupied_positions),
+        "analysis_errors": list(analysis.errors),
+        "analysis_warnings": list(analysis.warnings),
+        "validation": _safe_jsonable(analysis.validation),
+        "table_amount_state": _safe_jsonable(analysis.table_amount_state),
+        "amount_normalization": _safe_jsonable(analysis.amount_normalization),
+        "artifacts": artifacts.to_dict() if hasattr(artifacts, "to_dict") else _safe_jsonable(artifacts),
+        "raw_frame_path": getattr(artifacts, "raw_frame_path", None),
+        "overlay_frame_path": getattr(artifacts, "overlay_frame_path", None),
+        "hero_crop_path": getattr(artifacts, "hero_crop_path", None),
+        "hero_overlay_path": getattr(artifacts, "hero_overlay_path", None),
+        "board_crop_path": getattr(artifacts, "board_crop_path", None),
+        "board_overlay_path": getattr(artifacts, "board_overlay_path", None),
+        "debug_paths": list(getattr(artifacts, "debug_paths", []) or []),
+        "extra_paths": dict(getattr(artifacts, "extra_paths", {}) or {}),
+    }
+
+
+def _build_ui_error_state(
+    analysis: FrameAnalysis,
+    hand: Optional[HandState],
+    *,
+    stage: str,
+    message: str,
+    failure_paths: dict[str, str],
+    artifacts: Any | None = None,
+) -> dict[str, Any]:
+    street = str(analysis.street or ((hand.street_state or {}).get("current_street") if hand else "preflop") or "preflop")
+    player_count = int(analysis.player_count or (hand.player_count if hand is not None else 0) or 0)
+    table_format = str(analysis.table_format or (hand.table_format if hand is not None else "") or "")
+    hero_position = str(analysis.hero_position or (hand.hero_position if hand is not None else "") or "")
+    occupied_positions = list(analysis.occupied_positions or (hand.occupied_positions if hand is not None else []) or [])
+    players = {}
+    if hand is not None and isinstance(getattr(hand, "player_states", None), dict):
+        for position, payload in hand.player_states.items():
+            if not isinstance(payload, dict):
+                continue
+            players[position] = {
+                "position": position,
+                "occupied": position in occupied_positions if occupied_positions else True,
+                "is_hero": position == hero_position,
+                "is_button": position == "BTN",
+                "is_fold": bool(payload.get("is_fold", False)),
+                "is_all_in": bool(payload.get("is_all_in", False)),
+                "is_active": bool(payload.get("is_active", not bool(payload.get("is_fold", False)))),
+                "stack_bb": payload.get("stack_bb"),
+                "stack_text_raw": payload.get("stack_text_raw", ""),
+                "state_warnings": list(payload.get("warnings", [])),
+                "cards_visible": False,
+                "show_card_backs": False,
+                "current_bet_bb": 0.0,
+                "current_bet_raw": "",
+                "last_action": None,
+            }
+
+    failure_reason = _failure_reason_for_stage(stage)
+    artifact_paths = {
+        "raw_frame_path": getattr(artifacts, "raw_frame_path", None),
+        "overlay_frame_path": getattr(artifacts, "overlay_frame_path", None),
+        "hero_crop_path": getattr(artifacts, "hero_crop_path", None),
+        "hero_overlay_path": getattr(artifacts, "hero_overlay_path", None),
+        "board_crop_path": getattr(artifacts, "board_crop_path", None),
+        "board_overlay_path": getattr(artifacts, "board_overlay_path", None),
+        "extra_paths": dict(getattr(artifacts, "extra_paths", {}) or {}),
+    }
+    ui_error = {
+        "error_stage": stage,
+        "error_message": message,
+        "failure_reason": failure_reason,
+        "failed_frame_json_path": failure_paths.get("failed_frame_json_path"),
+        "ui_error_state_path": failure_paths.get("ui_error_state_path"),
+        **artifact_paths,
+    }
+
+    return {
+        "hand_id": hand.hand_id if hand is not None else f"failed_{analysis.frame_id}",
+        "player_count": player_count,
+        "table_format": table_format,
+        "street": street,
+        "hero_position": hero_position,
+        "hero_cards": list(analysis.hero_cards),
+        "board_cards": list(analysis.board_cards),
+        "players": players,
+        "status": "error",
+        "warnings": [f"Frame failed at {stage}", failure_reason],
+        "freshness": "error",
+        "source_frame_id": analysis.frame_id,
+        "source_timestamp": analysis.timestamp,
+        "updated_at": analysis.timestamp,
+        "seat_order": occupied_positions,
+        "table_amount_state": _safe_jsonable(analysis.table_amount_state),
+        "amount_normalization": _safe_jsonable(analysis.amount_normalization),
+        "amount_state": {},
+        "action_annotations": {"actions_log": [], "last_actions_by_position": {}},
+        "reconstructed_preflop": {},
+        "reconstructed_postflop": {},
+        "advisor_input": {},
+        "solver_input": {},
+        "solver_output": {},
+        "engine_result": {"status": "frame_failed_before_render_build"},
+        "solver_context": {},
+        "solver_status": "frame_failed_before_render_build",
+        "solver_warnings": [],
+        "solver_errors": [message],
+        "hero_decision_debug": {
+            "status": "error",
+            "error_stage": stage,
+            "error_message": message,
+            "failure_reason": failure_reason,
+        },
+        "solver_fingerprint": None,
+        "solver_result_reused": False,
+        "solver_reuse_reason": None,
+        "processing_summary": {
+            "failed_frame": True,
+            "error_stage": stage,
+            "error_message": message,
+        },
+        "solver_run_frame_id": None,
+        "solver_run_timestamp": None,
+        "recommended_action": "ERROR",
+        "recommended_amount_to": None,
+        "recommended_size_pct": None,
+        "node_type": stage,
+        "engine_status": "frame_failed_before_render_build",
+        "analysis_panel": {
+            "error_stage": stage,
+            "error_message": message,
+            "failure_reason": failure_reason,
+            "failed_frame_json_path": failure_paths.get("failed_frame_json_path"),
+            "ui_error_state_path": failure_paths.get("ui_error_state_path"),
+            **artifact_paths,
+        },
+        "ui_error": ui_error,
+    }
+
+
+def _save_failed_frame_and_build_ui_error(
+    storage: StorageManager,
+    analysis: FrameAnalysis,
+    hand: Optional[HandState],
+    *,
+    stage: str,
+    message: str,
+    artifacts: Any,
+) -> dict[str, Any]:
+    failed_frame_payload = _build_failed_frame_payload(analysis, hand, stage=stage, message=message, artifacts=artifacts)
+    ui_error_state = _build_ui_error_state(analysis, hand, stage=stage, message=message, failure_paths={}, artifacts=artifacts)
+    failure_paths = storage.save_failure_state(stage, analysis.frame_id, failed_frame_payload, ui_error_state)
+    ui_error_state["ui_error"].update(failure_paths)
+    ui_error_state["analysis_panel"].update(failure_paths)
+    ui_error_state["processing_summary"].update(failure_paths)
+    return ui_error_state
+
+
+def _apply_reused_solver_payload(analysis: FrameAnalysis, hand: HandState, preview: Any) -> None:
+    reuse_reason = "same_solver_input_fingerprint"
+    solver_context = _safe_jsonable((preview or {}).get("solver_context", {})) if isinstance(preview, dict) else {}
+    solver_input = _safe_jsonable((preview or {}).get("solver_input", {})) if isinstance(preview, dict) else {}
+    advisor_input = _safe_jsonable((preview or {}).get("advisor_input", {})) if isinstance(preview, dict) else {}
+    solver_output = _safe_jsonable(hand.solver_output or {})
+    solver_fingerprint = _extract_solver_fingerprint(preview)
+    runtime_range_state = _extract_runtime_range_state(preview, advisor_input, solver_input, solver_output)
+    postflop_range_trace = _build_canonical_postflop_range_trace(runtime_range_state, list(hand.solver_warnings or []))
+    advisor_input = _inject_canonical_postflop_range_trace(advisor_input, postflop_range_trace)
+    solver_input = _inject_canonical_postflop_range_trace(solver_input, postflop_range_trace)
+    solver_output = _inject_canonical_postflop_range_trace(solver_output, postflop_range_trace)
+
+    reused_engine_result = dict(hand.engine_result or {})
+    reused_engine_result["status"] = "reused_previous_solver_result"
+    reused_engine_result["reused"] = True
+    reused_engine_result["reuse_reason"] = reuse_reason
+
+    reused_debug = dict(hand.hero_decision_debug or {})
+    reused_debug["status"] = "reused_previous_solver_result"
+    reused_debug["reused"] = True
+    reused_debug["reuse_reason"] = reuse_reason
+    if postflop_range_trace:
+        reused_debug["postflop_range_trace"] = _safe_jsonable(postflop_range_trace)
+
+    analysis.solver_context_preview = dict(solver_context)
+    analysis.solver_result = dict(reused_engine_result)
+    analysis.solver_status = "reused_previous_solver_result"
+    analysis.solver_warnings = list(hand.solver_warnings or [])
+    analysis.solver_fingerprint_preview = solver_fingerprint
+    analysis.solver_result_reused = True
+    analysis.solver_reuse_reason = reuse_reason
+
+    hand.solver_context = dict(solver_context)
+    hand.advisor_input = dict(advisor_input)
+    hand.solver_input = dict(solver_input)
+    hand.solver_output = dict(solver_output)
+    hand.engine_result = dict(reused_engine_result)
+    hand.hero_decision_debug = dict(reused_debug)
+    hand.solver_status = "reused_previous_solver_result"
+    hand.solver_result_reused = True
+    hand.solver_reuse_reason = reuse_reason
+    _write_solver_bridge_processing_summary(analysis, hand, preview_payload=preview, reused=True)
+    hand.solver_fingerprint = solver_fingerprint
+
+
+
+class PokerVisionPipeline:
+    def __init__(self, settings: Settings, detector_backend, storage: StorageManager, hand_manager: HandStateManager):
+        self.settings = settings
+        self.detector_backend = detector_backend
+        self.storage = storage
+        self.hand_manager = hand_manager
+
+    def process_frame(self, frame) -> PipelineResult:
+        self.hand_manager.mark_stale_if_needed(frame.timestamp)
+        active = self.detector_backend.detect_active_hero(frame)
+        overlay = _draw_detections(frame.image, active, color=(0, 255, 255))
+        if not active:
+            analysis = FrameAnalysis(frame.frame_id, frame.timestamp, False)
+            return PipelineResult(
+                analysis=analysis,
+                hand=self.hand_manager.active_hand,
+                render_state=(self.hand_manager.active_hand.render_state_snapshot or None)
+                if self.hand_manager.active_hand
+                else None,
+            )
+
+        structure_dets = self.detector_backend.detect_structure(frame)
+        structure_val = validate_structure(
+            structure_dets,
+            self.settings.duplicate_iou_threshold,
+            self.settings.duplicate_center_distance_px,
+        )
+        overlay = _draw_detections(overlay, structure_dets, color=(0, 200, 0))
+        analysis = FrameAnalysis(
+            frame_id=frame.frame_id,
+            timestamp=frame.timestamp,
+            active_hero_found=True,
+            structure_detections=structure_dets,
+            validation={"structure_ok": structure_val.ok},
+        )
+        if not structure_val.ok:
+            analysis.errors.extend(structure_val.errors)
+            artifacts = self.storage.save_failure_artifacts(
+                "structure",
+                frame.frame_id,
+                frame.image,
+                overlay_frame=overlay,
+                debug_images=[overlay],
+            )
+            self.hand_manager.register_error(
+                self.hand_manager.active_hand,
+                "structure",
+                "; ".join(structure_val.errors),
+                frame.frame_id,
+                True,
+            )
+            error_render_state = _save_failed_frame_and_build_ui_error(
+                self.storage,
+                analysis,
+                self.hand_manager.active_hand,
+                stage="structure",
+                message="; ".join(structure_val.errors),
+                artifacts=artifacts,
+            )
+            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
+
+        cleaned = structure_val.meta["cleaned"]
+        btn = structure_val.meta["btn"][0]
+        seats = structure_val.meta["seats"]
+        player_count = int(structure_val.meta["player_count"])
+        table_format = str(structure_val.meta["table_format"])
+        analysis.player_count = player_count
+        analysis.table_format = table_format
+        analysis.btn_detection = btn
+
+        street_val = determine_street(cleaned)
+        if not street_val.ok:
+            analysis.errors.extend(street_val.errors)
+            artifacts = self.storage.save_failure_artifacts(
+                "street",
+                frame.frame_id,
+                frame.image,
+                overlay_frame=overlay,
+                debug_images=[overlay],
+            )
+            self.hand_manager.register_error(
+                self.hand_manager.active_hand,
+                "street",
+                "; ".join(street_val.errors),
+                frame.frame_id,
+                True,
+            )
+            error_render_state = _save_failed_frame_and_build_ui_error(
+                self.storage,
+                analysis,
+                self.hand_manager.active_hand,
+                stage="street",
+                message="; ".join(street_val.errors),
+                artifacts=artifacts,
+            )
+            return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
+
+        street = str(street_val.meta["street"])
+        analysis.street = street
+        table_center, positions = assign_positions(seats, btn, player_count)
+        hero_position = determine_hero_position(positions, active, self.settings.seat_match_max_distance_px)
+        positions[hero_position]["is_hero"] = True
+        occupied_positions = list(positions.keys())
+        analysis.positions = positions
+        analysis.hero_position = hero_position
+        analysis.occupied_positions = occupied_positions
+        analysis.table_center = table_center
+
+        player_crops: dict[str, np.ndarray] = {}
+        player_overlays: dict[str, np.ndarray] = {}
+        player_validation: dict[str, bool] = {}
+        for position, payload in positions.items():
+            player_bbox = BBox(**payload["bbox"])
+            player_crop, player_origin = build_player_state_crop(frame.image, player_bbox, self.settings)
+            player_global_dets = self.detector_backend.detect_player_state(frame, player_bbox)
+            player_local_dets = _localize(player_global_dets, player_origin)
+            player_overlay = _draw_detections(player_crop, player_local_dets, color=(150, 220, 255))
+            player_crops[position] = player_crop
+            player_overlays[position] = player_overlay
+            analysis.player_state_detections[position] = player_global_dets
+            player_val = validate_player_state(
+                position,
+                player_local_dets,
+                crop_height=player_crop.shape[0],
+                lower_band_ratio=self.settings.player_state_lower_band_ratio,
+                iou_threshold=self.settings.player_state_token_iou_threshold,
+                center_threshold=self.settings.player_state_token_center_threshold_px,
+            )
+            player_validation[position] = player_val.ok
+            analysis.player_states[position] = player_val.meta["player_state"]
+            if player_val.errors:
+                analysis.warnings.extend([f"{position}: {error}" for error in player_val.errors])
+            if player_val.warnings:
+                analysis.warnings.extend([f"{position}: {warning}" for warning in player_val.warnings])
+        analysis.validation["player_states_ok"] = player_validation
+
+        table_amount_regions = self.detector_backend.detect_table_amount_regions(frame)
+        analysis.table_amount_region_detections = table_amount_regions
+        overlay = _draw_detections(overlay, table_amount_regions, color=(255, 100, 255))
+        table_amount_crops: dict[str, np.ndarray] = {}
+        table_amount_overlays: dict[str, np.ndarray] = {}
+        table_amount_digit_map: dict[str, list[Detection]] = {}
+        for idx, region_det in enumerate(table_amount_regions):
+            region_id = f"{region_det.label}_{idx}"
+            region_key = _region_key(region_det)
+            region_crop, region_origin = build_table_amount_crop(frame.image, region_det.bbox, self.settings)
+            digit_global = self.detector_backend.detect_table_amount_digits(frame, region_det.bbox)
+            digit_local = _localize(digit_global, region_origin)
+            region_overlay = _draw_detections(region_crop, digit_local, color=(255, 180, 0))
+            table_amount_crops[region_id] = region_crop
+            table_amount_overlays[region_id] = region_overlay
+            table_amount_digit_map[region_id] = digit_local
+            table_amount_digit_map[region_key] = digit_local
+            analysis.table_amount_digit_detections[region_id] = digit_global
+            analysis.table_amount_digit_detections[region_key] = digit_global
+
+        table_amount_val = build_table_amount_state(
+            table_amount_regions,
+            table_amount_digit_map,
+            positions,
+            analysis.player_states,
+            table_center,
+            street,
+            self.settings,
+        )
+        analysis.table_amount_state = table_amount_val.meta["table_amount_state"]
+        if table_amount_val.warnings:
+            analysis.warnings.extend(table_amount_val.warnings)
+        if table_amount_val.errors:
+            analysis.warnings.extend(table_amount_val.errors)
+        analysis.validation["table_amount_ok"] = table_amount_val.ok
+
+        analysis.amount_normalization = normalize_amount_contributions(
+            analysis.table_amount_state,
+            street,
+            int(analysis.player_count or 0),
+            list(analysis.occupied_positions),
+            analysis.hero_position,
+            analysis.player_states,
+        )
+        if analysis.amount_normalization.get("warnings"):
+            analysis.warnings.extend(list(analysis.amount_normalization.get("warnings", [])))
+
+        hero_bbox = BBox(**positions[hero_position]["bbox"])
+        hero_crop, hero_origin = build_hero_crop(frame.image, hero_bbox, self.settings)
+        hero_card_dets = self.detector_backend.detect_hero_cards(frame, hero_bbox)
+        hero_local_dets = _localize(hero_card_dets, hero_origin)
+        hero_overlay = _draw_detections(hero_crop, hero_local_dets, color=(255, 255, 0))
+        analysis.hero_card_detections = hero_card_dets
+        hero_val = validate_hero_cards(hero_local_dets)
+        analysis.validation["hero_cards_ok"] = hero_val.ok
+        analysis.validation["hero_cards_retry"] = {
+            "attempted": False,
+            "recovered": False,
+            "primary_detection_count": len(hero_local_dets),
+            "primary_errors": list(hero_val.errors),
+        }
+        if hero_val.ok:
+            analysis.hero_cards = hero_val.meta["cards"]
+        else:
+            retry_crop = None
+            retry_overlay = None
+            retry_global_dets: list[Detection] = []
+            retry_local_dets: list[Detection] = []
+            retry_val = None
+            if self.settings.max_retry_per_stage > 0:
+                retry_bbox = _expand_bbox_for_retry(hero_bbox, frame.image, pad_x=28.0, pad_top=20.0, pad_bottom=36.0)
+                retry_crop, retry_origin = build_hero_crop(frame.image, retry_bbox, self.settings)
+                retry_global_dets = self.detector_backend.detect_hero_cards(frame, retry_bbox)
+                retry_local_dets = _localize(retry_global_dets, retry_origin)
+                retry_overlay = _draw_detections(retry_crop, retry_local_dets, color=(0, 255, 255))
+                retry_val = validate_hero_cards(retry_local_dets)
+                analysis.validation["hero_cards_retry"] = {
+                    "attempted": True,
+                    "recovered": bool(retry_val.ok),
+                    "primary_detection_count": len(hero_local_dets),
+                    "retry_detection_count": len(retry_local_dets),
+                    "primary_errors": list(hero_val.errors),
+                    "retry_errors": list(retry_val.errors),
+                    "retry_bbox": _safe_jsonable(retry_bbox),
+                }
+                if retry_val.ok:
+                    analysis.hero_card_detections = retry_global_dets
+                    analysis.hero_cards = retry_val.meta["cards"]
+                    analysis.validation["hero_cards_ok"] = True
+                    analysis.warnings.append("hero_cards recovered by expanded retry crop")
+                    hero_crop = retry_crop
+                    hero_overlay = retry_overlay
+            if not analysis.validation.get("hero_cards_ok"):
+                analysis.errors.extend(hero_val.errors)
+                retry_debug_images = [overlay, hero_overlay]
+                if retry_overlay is not None:
+                    retry_debug_images.append(retry_overlay)
+                artifacts = self.storage.save_failure_artifacts(
+                    "hero_cards",
+                    frame.frame_id,
+                    frame.image,
+                    overlay_frame=overlay,
+                    hero_crop=hero_crop,
+                    hero_overlay=hero_overlay,
+                    player_crops=player_crops,
+                    player_overlays=player_overlays,
+                    table_amount_crops=table_amount_crops,
+                    table_amount_overlays=table_amount_overlays,
+                    debug_images=retry_debug_images,
+                    extra_images={
+                        "hero_primary_crop": hero_crop,
+                        "hero_primary_overlay": hero_overlay,
+                        **({"hero_retry_crop": retry_crop} if retry_crop is not None else {}),
+                        **({"hero_retry_overlay": retry_overlay} if retry_overlay is not None else {}),
+                    },
+                )
+                full_message = "; ".join(hero_val.errors)
+                if retry_val is not None and retry_val.errors:
+                    full_message = f"{full_message} | retry: {'; '.join(retry_val.errors)}"
+                self.hand_manager.register_error(
+                    self.hand_manager.active_hand,
+                    "hero_cards",
+                    full_message,
+                    frame.frame_id,
+                    True,
+                )
+                error_render_state = _save_failed_frame_and_build_ui_error(
+                    self.storage,
+                    analysis,
+                    self.hand_manager.active_hand,
+                    stage="hero_cards",
+                    message=full_message,
+                    artifacts=artifacts,
+                )
+                return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
+
+        board_crop = None
+        board_overlay = None
+        if street != "preflop":
+            marker_label = street.capitalize()
+            marker = next((d for d in cleaned if d.label == marker_label), None)
+            if marker is None:
+                analysis.errors.append(f"Missing {marker_label} marker")
+                artifacts = self.storage.save_failure_artifacts(
+                    "board_marker",
+                    frame.frame_id,
+                    frame.image,
+                    overlay_frame=overlay,
+                    hero_crop=hero_crop,
+                    hero_overlay=hero_overlay,
+                    player_crops=player_crops,
+                    player_overlays=player_overlays,
+                    table_amount_crops=table_amount_crops,
+                    table_amount_overlays=table_amount_overlays,
+                    debug_images=[overlay, hero_overlay],
+                )
+                self.hand_manager.register_error(
+                    self.hand_manager.active_hand,
+                    "board_marker",
+                    f"Missing {marker_label} marker",
+                    frame.frame_id,
+                    True,
+                )
+                error_render_state = _save_failed_frame_and_build_ui_error(
+                    self.storage,
+                    analysis,
+                    self.hand_manager.active_hand,
+                    stage="board_marker",
+                    message=f"Missing {marker_label} marker",
+                    artifacts=artifacts,
+                )
+                return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
+
+            board_bbox = marker.bbox
+            board_crop, board_origin = build_board_crop(frame.image, board_bbox, self.settings)
+            board_global_dets = self.detector_backend.detect_board_cards(frame, board_bbox, street)
+            board_local_dets = _localize(board_global_dets, board_origin)
+            board_overlay = _draw_detections(board_crop, board_local_dets, color=(255, 150, 0))
+            analysis.board_card_detections = board_global_dets
+            board_val = validate_board_cards(board_local_dets, street)
+            analysis.validation["board_cards_ok"] = board_val.ok
+            if board_val.ok:
+                analysis.board_cards = board_val.meta["cards"]
+            else:
+                retry_ok = False
+                if self.settings.max_retry_per_stage > 0:
+                    expanded_marker = BBox(board_bbox.x1 - 20, board_bbox.y1 - 10, board_bbox.x2 + 20, board_bbox.y2 + 10)
+                    retry_global = self.detector_backend.detect_board_cards(frame, expanded_marker, street)
+                    retry_crop, retry_origin = build_board_crop(frame.image, expanded_marker, self.settings)
+                    retry_local = _localize(retry_global, retry_origin)
+                    retry_val = validate_board_cards(retry_local, street)
+                    if retry_val.ok:
+                        board_crop = retry_crop
+                        board_overlay = _draw_detections(retry_crop, retry_local, color=(255, 150, 0))
+                        analysis.board_card_detections = retry_global
+                        analysis.board_cards = retry_val.meta["cards"]
+                        retry_ok = True
+                if not retry_ok:
+                    analysis.errors.extend(board_val.errors)
+                    artifacts = self.storage.save_failure_artifacts(
+                        "board_cards",
+                        frame.frame_id,
+                        frame.image,
+                        overlay_frame=overlay,
+                        hero_crop=hero_crop,
+                        hero_overlay=hero_overlay,
+                        board_crop=board_crop,
+                        board_overlay=board_overlay,
+                        player_crops=player_crops,
+                        player_overlays=player_overlays,
+                        table_amount_crops=table_amount_crops,
+                        table_amount_overlays=table_amount_overlays,
+                        debug_images=[overlay, hero_overlay] + ([board_overlay] if board_overlay is not None else []),
+                    )
+                    self.hand_manager.register_error(
+                        self.hand_manager.active_hand,
+                        "board_cards",
+                        "; ".join(board_val.errors),
+                        frame.frame_id,
+                        True,
+                    )
+                    error_render_state = _save_failed_frame_and_build_ui_error(
+                        self.storage,
+                        analysis,
+                        self.hand_manager.active_hand,
+                        stage="board_cards",
+                        message="; ".join(board_val.errors),
+                        artifacts=artifacts,
+                    )
+                    return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
+
+        # CRITICAL INVARIANT:
+        # Preflop/postflop action reconstruction may reuse state from the previous
+        # hand only after the current frame HERO cards / board have already been
+        # validated onto ``analysis``. Running infer_actions() earlier makes
+        # same-hand checks see empty hero_cards and forces the reconciler into
+        # frame_only_passthrough even for the same logical hand.
+        if self.settings.action_reconstruction_enabled:
+            analysis.action_inference = infer_actions(self.hand_manager.active_hand, analysis, self.settings)
+        else:
+            analysis.action_inference = {}
+
+        previous_street = self.hand_manager.active_hand.street_state.get("current_street") if self.hand_manager.active_hand else None
+        hand, decision, created_new = self.hand_manager.update_or_create(analysis)
+
+        repeated_same_street = (
+            not created_new
+            and previous_street == analysis.street
+            and decision.status in {MATCH_STRONG, MATCH_WEAK}
+        )
+
+        # CRITICAL INVARIANT:
+        # Solver dedup must be decided from the normalized solver/advisor contract,
+        # not from ad-hoc image/frame heuristics. A repeated same-street frame may
+        # still contain a new action or changed pot/to_call, and only the previewed
+        # solver input fingerprint can tell whether the actual solver state is the same.
+        solver_preview = build_solver_contract_preview(analysis, hand, self.settings)
+        solver_fingerprint = _extract_solver_fingerprint(solver_preview)
+        analysis.solver_fingerprint_preview = solver_fingerprint
+
+        can_reuse_solver = (
+            repeated_same_street
+            and isinstance(solver_preview, dict)
+            and str(solver_preview.get("status") or "") == "ready"
+            and bool(solver_fingerprint)
+            and solver_fingerprint == str(hand.solver_fingerprint or "")
+            and bool(hand.solver_output or hand.engine_result)
+            and str(hand.solver_status or "") in {"ok", "reused_previous_solver_result"}
+        )
+
+        if can_reuse_solver:
+            _mark_solver_reuse_hit(hand)
+            _apply_reused_solver_payload(analysis, hand, solver_preview)
+        else:
+            _mark_solver_run_attempt(hand)
+            solver_result: Any = None
+            try:
+                solver_result = build_solver_recommendation(analysis, hand, self.settings)
+            except Exception as exc:  # pragma: no cover - defensive safety for runtime integration
+                solver_result = {
+                    "status": "error",
+                    "error": str(exc),
+                    "result": None,
+                }
+            _apply_solver_payload(analysis, hand, solver_result)
+            _write_solver_bridge_processing_summary(analysis, hand, preview_payload=solver_preview, recommendation_payload=solver_result)
+            hand.solver_fingerprint = solver_fingerprint
+            hand.solver_result_reused = False
+            hand.solver_reuse_reason = None
+            if hand.solver_status == "ok":
+                hand.solver_run_frame_id = frame.frame_id
+                hand.solver_run_timestamp = frame.timestamp
+
+        save_only_raw = repeated_same_street and not self.settings.normal_mode_save_repeated_frames
+        artifacts = self.storage.save_pipeline_artifacts(
+            hand.hand_id,
+            frame.frame_id,
+            frame.image,
+            overlay_frame=overlay,
+            hero_crop=hero_crop,
+            hero_overlay=hero_overlay,
+            board_crop=board_crop,
+            board_overlay=board_overlay,
+            player_crops=player_crops,
+            player_overlays=player_overlays,
+            table_amount_crops=table_amount_crops,
+            table_amount_overlays=table_amount_overlays,
+            debug_images=[
+                img
+                for img in [overlay, hero_overlay, board_overlay, *player_overlays.values(), *table_amount_overlays.values()]
+                if img is not None
+            ],
+            save_only_raw=save_only_raw,
+        )
+        hand.artifacts = artifacts.to_dict()
+
+        render_state = build_render_state(hand, frame.frame_id, frame.timestamp).to_dict()
+        hand.render_state_snapshot = render_state
+        self.storage.save_render_state(hand.hand_id, render_state)
+        save_hand_json(self.storage.hand_dir(hand.hand_id) / "hand.json", hand)
+        return PipelineResult(analysis=analysis, hand=hand, render_state=render_state)
