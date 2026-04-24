@@ -1896,16 +1896,20 @@ class IntegratedRunner:
             self._init_slot_contexts()
 
     def _build_slot_settings(self, slot_id: str) -> Tuple[Any, Dict[str, Path]]:
-        """Create an isolated Settings clone for one table slot.
+        """Create a settings clone for one table slot without changing root_dir.
 
-        StorageManager derives hands/logs/temp paths from settings.root_dir.
-        If all slot pipelines share self.settings, every hand history is written
-        into the same root even when the frame_id contains table_02/table_03.
-        The fix is to give each slot pipeline its own settings object rooted at:
-            <project_root>/tables/table_XX
+        Current StorageManager already owns the multi-table layout and resolves
+        files as:
+            <project_root>/tables/table_XX/...
+
+        Therefore root_dir must stay equal to the project root. If root_dir is
+        changed to <project_root>/tables/table_XX, StorageManager appends
+        /tables/table_XX again and creates nested folders like:
+            tables/table_01/tables/table_01/...
         """
         normalized = normalize_slot_id(slot_id)
-        paths = resolve_slot_paths(normalized, Path(self.settings.root_dir))
+        base_root = Path(self.settings.root_dir).expanduser().resolve()
+        paths = resolve_slot_paths(normalized, base_root)
         try:
             slot_settings = copy.copy(self.settings)
         except Exception:
@@ -1926,13 +1930,21 @@ class IntegratedRunner:
                         pass
             except Exception:
                 pass
-        slot_settings.root_dir = paths["slot_root"]
+        slot_settings.root_dir = base_root
         return slot_settings, paths
 
     def _init_slot_contexts(self) -> None:
         for slot_id in SLOT_IDS:
             slot_settings, paths = self._build_slot_settings(slot_id)
             storage = StorageManager(slot_settings)
+            if hasattr(storage, "set_active_slot"):
+                storage.set_active_slot(slot_id)
+                try:
+                    paths = storage.resolve_slot_paths(slot_id)
+                    for path in paths.values():
+                        Path(path).mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
             hand_manager = HandStateManager(
                 slot_settings.schema_version,
                 slot_settings.hand_stale_timeout_sec,
@@ -2267,6 +2279,9 @@ class IntegratedRunner:
         runtime = auto_click_runtime if auto_click_runtime is not None else self.auto_click_runtime
         previous_runtime = self.auto_click_runtime
         self.auto_click_runtime = runtime
+
+        if slot_id and hasattr(pipeline, "storage") and hasattr(pipeline.storage, "set_active_slot"):
+            pipeline.storage.set_active_slot(slot_id)
 
         result = pipeline.process_frame(frame)
         decision = None
