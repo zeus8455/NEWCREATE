@@ -208,8 +208,9 @@ class ButtonDetection:
     frame_ts: float
     source_class_name: Optional[str] = None
     local_bbox: Optional[Tuple[float, float, float, float]] = None
-    local_center_x: Optional[float] = None
-    local_center_y: Optional[float] = None
+    global_bbox: Optional[Tuple[float, float, float, float]] = None
+    coordinate_space: str = "global"
+    slot_id: Optional[str] = None
 
     @property
     def width(self) -> float:
@@ -239,8 +240,9 @@ class AutoClickSnapshot:
     monitor_width: int = 0
     monitor_height: int = 0
     frame_source: str = "launcher_frame"
-    slot_id: str = "table_01"
-    slot_bbox: Optional[Tuple[int, int, int, int]] = None
+    slot_id: Optional[str] = None
+    slot_bbox: Optional[Tuple[float, float, float, float]] = None
+    slot_global_offset: Tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass(slots=True)
@@ -330,30 +332,6 @@ class AutoClickConfig:
     disable_aggressive_auto_actions: bool = False
     require_identity_match: bool = True
     log_prefix: str = "[AutoClick]"
-
-
-@dataclass(slots=True)
-class AutoClickSlotState:
-    state: str = STATE_IDLE
-    wait_started_at: Optional[float] = None
-    error_started_at: Optional[float] = None
-    post_click_until: float = 0.0
-    last_cycle_key: Optional[str] = None
-    last_hand_id: Optional[str] = None
-    last_executed_decision_id: Optional[str] = None
-    last_executed_solver_fingerprint: Optional[str] = None
-    last_executed_source_frame_id: Optional[str] = None
-    last_executed_hand_id: Optional[str] = None
-    last_executed_street: Optional[str] = None
-    last_executed_plan_name: Optional[str] = None
-    last_executed_at: Optional[float] = None
-    last_executed_decision_guard: Optional[str] = None
-    locked_decision_id: Optional[str] = None
-    locked_decision_guard: Optional[str] = None
-    last_plan_name: Optional[str] = None
-    last_normalized_action: Optional[str] = None
-    last_raw_action: Optional[str] = None
-    last_click_at: Optional[float] = None
 
 
 class ButtonDetectorProtocol(Protocol):
@@ -486,86 +464,30 @@ class AutoClickRuntime:
                 LOGGER.exception("%s failed to initialize button detector", self.config.log_prefix)
                 self.button_detector = None
 
-        self._slot_states: Dict[str, AutoClickSlotState] = {}
-        self._active_slot_key = "table_01"
-        self._ensure_slot_state(self._active_slot_key)
+        self.state = STATE_IDLE
+        self.wait_started_at: Optional[float] = None
+        self.error_started_at: Optional[float] = None
+        self.post_click_until = 0.0
+        self.last_cycle_key: Optional[str] = None
+        self.last_hand_id: Optional[str] = None
+        self.last_executed_decision_id: Optional[str] = None
+        self.last_executed_solver_fingerprint: Optional[str] = None
+        self.last_executed_source_frame_id: Optional[str] = None
+        self.last_executed_hand_id: Optional[str] = None
+        self.last_executed_street: Optional[str] = None
+        self.last_executed_plan_name: Optional[str] = None
+        self.last_executed_at: Optional[float] = None
+        self.last_executed_decision_guard: Optional[str] = None
+        self.locked_decision_id: Optional[str] = None
+        self.locked_decision_guard: Optional[str] = None
+        self.last_plan_name: Optional[str] = None
+        self.last_normalized_action: Optional[str] = None
+        self.last_raw_action: Optional[str] = None
+        self.last_click_at: Optional[float] = None
         self.next_idle_at = self._schedule_next_idle(time.monotonic())
         self.recent_events: List[AutoClickEvent] = []
         self.debug_root = Path(self.config.debug_root_dir).expanduser().resolve()
         self.debug_root.mkdir(parents=True, exist_ok=True)
-
-    _SLOT_STATE_FIELDS = {
-        "state",
-        "wait_started_at",
-        "error_started_at",
-        "post_click_until",
-        "last_cycle_key",
-        "last_hand_id",
-        "last_executed_decision_id",
-        "last_executed_solver_fingerprint",
-        "last_executed_source_frame_id",
-        "last_executed_hand_id",
-        "last_executed_street",
-        "last_executed_plan_name",
-        "last_executed_at",
-        "last_executed_decision_guard",
-        "locked_decision_id",
-        "locked_decision_guard",
-        "last_plan_name",
-        "last_normalized_action",
-        "last_raw_action",
-        "last_click_at",
-    }
-
-    def __getattribute__(self, name: str):
-        slot_fields = object.__getattribute__(self, "_SLOT_STATE_FIELDS")
-        if name in slot_fields:
-            try:
-                slot_states = object.__getattribute__(self, "_slot_states")
-            except AttributeError:
-                return object.__getattribute__(self, name)
-            slot_key = object.__getattribute__(self, "_active_slot_key") if hasattr(self, "_active_slot_key") else "table_01"
-            if slot_key not in slot_states:
-                object.__getattribute__(self, "_ensure_slot_state")(slot_key)
-                slot_states = object.__getattribute__(self, "_slot_states")
-            return getattr(slot_states[slot_key], name)
-        return object.__getattribute__(self, name)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        slot_fields = getattr(type(self), "_SLOT_STATE_FIELDS", set())
-        if name in slot_fields and "_slot_states" in self.__dict__:
-            slot_states = object.__getattribute__(self, "_slot_states")
-            slot_key = object.__getattribute__(self, "_active_slot_key") if "_active_slot_key" in self.__dict__ else "table_01"
-            if slot_key not in slot_states:
-                self._ensure_slot_state(slot_key)
-                slot_states = object.__getattribute__(self, "_slot_states")
-            setattr(slot_states[slot_key], name, value)
-            return
-        object.__setattr__(self, name, value)
-
-    def _normalize_slot_key(self, slot_id: object) -> str:
-        raw = str(slot_id or "").strip()
-        return raw or "table_01"
-
-    def _ensure_slot_state(self, slot_id: object = None) -> AutoClickSlotState:
-        slot_key = self._normalize_slot_key(slot_id if slot_id is not None else getattr(self, "_active_slot_key", "table_01"))
-        slot_states = object.__getattribute__(self, "_slot_states")
-        state = slot_states.get(slot_key)
-        if state is None:
-            state = AutoClickSlotState()
-            slot_states[slot_key] = state
-        return state
-
-    def _activate_slot(self, slot_id: object) -> str:
-        slot_key = self._normalize_slot_key(slot_id)
-        object.__setattr__(self, "_active_slot_key", slot_key)
-        self._ensure_slot_state(slot_key)
-        return slot_key
-
-    def _reset_slot_state(self, slot_key: object) -> None:
-        normalized = self._normalize_slot_key(slot_key)
-        slot_states = object.__getattribute__(self, "_slot_states")
-        slot_states[normalized] = AutoClickSlotState()
 
     def _build_default_mouse_backend(self) -> MouseBackendProtocol:
         if os.name == "nt" and ctypes is not None:
@@ -636,11 +558,10 @@ class AutoClickRuntime:
         }
         joined_reason = " | ".join(part for part in (solver_status, fallback_reason, reason_text) if part)
         has_unusable_marker = any(marker in joined_reason for marker in unusable_markers)
-        non_clickable_actions = {"", "none", "error", "unsupported", "invalid"}
-        normalized_action = extracted_action or engine_action
-        if normalized_action in non_clickable_actions:
+        has_clickable_action = bool(engine_action or extracted_action)
+        if not has_clickable_action:
             return None, False, "missing_clickable_action"
-        if has_unusable_marker and engine_action in non_clickable_actions:
+        if has_unusable_marker and engine_action in ("", "none"):
             return None, False, "solver_unavailable"
         if not decision_ready:
             return hero_decision, False, None
@@ -662,18 +583,26 @@ class AutoClickRuntime:
         monitor_width: int = 0,
         monitor_height: int = 0,
         monitor_name: str = "primary",
-        slot_id: str = "table_01",
-        slot_bbox: Optional[Tuple[int, int, int, int]] = None,
+        slot_id: Optional[str] = None,
+        slot_bbox: Optional[Tuple[float, float, float, float]] = None,
+        frame_source: str = "launcher_frame",
     ) -> AutoClickSnapshot:
         hero_decision, decision_ready, stripped_reason = self._sanitize_launcher_decision(hero_decision, decision_ready)
         street = "preflop"
         hand_id = None
         total_pot_bb = None
         meta: Dict[str, object] = {}
-        slot_id = self._normalize_slot_key(slot_id)
-        meta["slot_id"] = slot_id
-        if slot_bbox is not None:
-            meta.setdefault("slot_bbox", list(slot_bbox))
+        normalized_slot_bbox = self._normalize_slot_bbox(slot_bbox)
+        normalized_slot_id = str(slot_id).strip() if slot_id not in (None, "") else None
+        slot_offset = (0.0, 0.0)
+        if normalized_slot_bbox is not None:
+            slot_offset = (float(normalized_slot_bbox[0]), float(normalized_slot_bbox[1]))
+            if normalized_slot_id is None:
+                normalized_slot_id = "table_01"
+            meta["slot_bbox"] = [float(v) for v in normalized_slot_bbox]
+            meta["slot_global_offset"] = [float(slot_offset[0]), float(slot_offset[1])]
+        if normalized_slot_id:
+            meta["slot_id"] = normalized_slot_id
         if stripped_reason:
             meta["autoclick_decision_absent_reason"] = stripped_reason
         if hero_decision is not None:
@@ -744,9 +673,10 @@ class AutoClickRuntime:
             monitor_width=int(monitor_width),
             monitor_height=int(monitor_height),
             monitor_name=str(monitor_name or "primary"),
-            frame_source="launcher_frame",
-            slot_id=slot_id,
-            slot_bbox=slot_bbox,
+            frame_source=str(frame_source or "launcher_frame"),
+            slot_id=normalized_slot_id,
+            slot_bbox=normalized_slot_bbox,
+            slot_global_offset=slot_offset,
         )
 
     def step(
@@ -756,7 +686,6 @@ class AutoClickRuntime:
         frame_bgr: Any = None,
         detections: Optional[Sequence[ButtonDetection]] = None,
     ) -> AutoClickResult:
-        slot_key = self._activate_slot(getattr(snapshot, "slot_id", "table_01"))
         now = time.monotonic()
         events: List[AutoClickEvent] = []
         if not self.config.enabled:
@@ -1008,24 +937,39 @@ class AutoClickRuntime:
         return self._finalize(self._result_from_state(plan, executed, events, locked=executed))
 
     def reset(self) -> None:
-        slot_keys = list(getattr(self, "_slot_states", {}).keys())
-        if not slot_keys:
-            self._reset_slot_state("table_01")
-            return
-        for slot_key in slot_keys:
-            self._reset_slot_state(slot_key)
+        self.state = STATE_IDLE
+        self.wait_started_at = None
+        self.error_started_at = None
+        self.post_click_until = 0.0
+        self.last_cycle_key = None
+        self.last_hand_id = None
+        self.last_executed_decision_id = None
+        self.last_executed_solver_fingerprint = None
+        self.last_executed_source_frame_id = None
+        self.last_executed_hand_id = None
+        self.last_executed_street = None
+        self.last_executed_plan_name = None
+        self.last_executed_at = None
+        self.last_executed_decision_guard = None
+        self.locked_decision_id = None
+        self.locked_decision_guard = None
+        self.last_plan_name = None
+        self.last_normalized_action = None
+        self.last_raw_action = None
+        self.last_click_at = None
 
     def get_recent_events(self) -> List[AutoClickEvent]:
         return list(self.recent_events)
 
     def _cycle_key(self, snapshot: AutoClickSnapshot) -> str:
+        slot_prefix = f"{snapshot.slot_id or 'single'}:"
         if snapshot.hand_id:
-            return f"slot:{snapshot.slot_id}:hand:{snapshot.hand_id}"
+            return f"{slot_prefix}hand:{snapshot.hand_id}"
         if snapshot.active_hero_present and self.last_hand_id:
-            return f"slot:{snapshot.slot_id}:hand:{self.last_hand_id}"
+            return f"{slot_prefix}hand:{self.last_hand_id}"
         if snapshot.active_hero_present:
-            return f"slot:{snapshot.slot_id}:active_hero_session"
-        return f"slot:{snapshot.slot_id}:started:{float(snapshot.decision_started_at):.6f}"
+            return f"{slot_prefix}active_hero_session"
+        return f"{slot_prefix}started:{float(snapshot.decision_started_at):.6f}"
 
     def _should_reset_cycle(self, snapshot: AutoClickSnapshot, cycle_key: str) -> bool:
         if self.last_cycle_key is None:
@@ -1095,81 +1039,110 @@ class AutoClickRuntime:
             )
         )
 
+    def _normalize_slot_bbox(self, slot_bbox: Optional[Sequence[float]]) -> Optional[Tuple[float, float, float, float]]:
+        if slot_bbox is None:
+            return None
+        try:
+            values = tuple(float(v) for v in slot_bbox)
+        except Exception:
+            return None
+        if len(values) != 4:
+            return None
+        x1, y1, x2, y2 = values
+        left = min(x1, x2)
+        top = min(y1, y2)
+        right = max(x1, x2)
+        bottom = max(y1, y2)
+        if right <= left or bottom <= top:
+            return None
+        return (left, top, right, bottom)
+
+    def _snapshot_uses_slot_local_coordinates(self, snapshot: AutoClickSnapshot) -> bool:
+        if snapshot.slot_bbox is None:
+            return False
+        source = str(snapshot.frame_source or "").strip().lower()
+        return source in {"slot_crop", "slot_frame", "launcher_slot_crop", "mss_slot_crop"}
+
+    def _translate_local_bbox_to_global(
+        self,
+        bbox: Tuple[float, float, float, float],
+        snapshot: AutoClickSnapshot,
+    ) -> Tuple[float, float, float, float]:
+        if not self._snapshot_uses_slot_local_coordinates(snapshot):
+            return bbox
+        offset_x, offset_y = snapshot.slot_global_offset
+        return (
+            float(bbox[0]) + float(offset_x),
+            float(bbox[1]) + float(offset_y),
+            float(bbox[2]) + float(offset_x),
+            float(bbox[3]) + float(offset_y),
+        )
+
+    def _point_inside_slot(self, x: int, y: int, snapshot: AutoClickSnapshot) -> bool:
+        slot_bbox = self._normalize_slot_bbox(snapshot.slot_bbox)
+        if slot_bbox is None:
+            return True
+        x1, y1, x2, y2 = slot_bbox
+        return float(x1) <= float(x) <= float(x2) and float(y1) <= float(y) <= float(y2)
+
+    def _bbox_inside_slot(self, bbox: Tuple[float, float, float, float], snapshot: AutoClickSnapshot) -> bool:
+        slot_bbox = self._normalize_slot_bbox(snapshot.slot_bbox)
+        if slot_bbox is None:
+            return True
+        x1, y1, x2, y2 = bbox
+        sx1, sy1, sx2, sy2 = slot_bbox
+        cx = (float(x1) + float(x2)) / 2.0
+        cy = (float(y1) + float(y2)) / 2.0
+        return float(sx1) <= cx <= float(sx2) and float(sy1) <= cy <= float(sy2)
+
     def _get_detection_frame(self, snapshot: AutoClickSnapshot, frame_bgr: Any) -> Tuple[Any, Dict[str, object]]:
-        width = int(snapshot.monitor_width or 0)
-        height = int(snapshot.monitor_height or 0)
-        slot_bbox = getattr(snapshot, "slot_bbox", None)
-        slot_offset_x = 0
-        slot_offset_y = 0
-        slot_width = 0
-        slot_height = 0
-        if slot_bbox is not None and len(slot_bbox) == 4:
-            try:
-                sx1, sy1, sx2, sy2 = [int(v) for v in slot_bbox]
-                slot_offset_x = sx1
-                slot_offset_y = sy1
-                slot_width = max(0, sx2 - sx1)
-                slot_height = max(0, sy2 - sy1)
-            except Exception:
-                slot_bbox = None
-
         if frame_bgr is not None:
-            meta: Dict[str, object] = {"source": "launcher_slot_frame" if slot_bbox is not None else "launcher_frame"}
-            if slot_bbox is not None:
-                meta.update(
-                    {
-                        "slot_local_bbox": [slot_offset_x, slot_offset_y, slot_offset_x + slot_width, slot_offset_y + slot_height],
-                        "slot_global_offset": [int(snapshot.monitor_left + slot_offset_x), int(snapshot.monitor_top + slot_offset_y)],
-                        "frame_kind": "slot_crop",
-                    }
-                )
-            else:
-                meta.update({"slot_global_offset": [int(snapshot.monitor_left), int(snapshot.monitor_top)], "frame_kind": "full_frame"})
-            return frame_bgr, meta
-
+            return frame_bgr, {
+                "source": str(snapshot.frame_source or "launcher_frame"),
+                "slot_id": snapshot.slot_id,
+                "slot_bbox": list(snapshot.slot_bbox) if snapshot.slot_bbox is not None else None,
+                "slot_global_offset": list(snapshot.slot_global_offset),
+                "coordinates": "slot_local" if self._snapshot_uses_slot_local_coordinates(snapshot) else "global",
+            }
         if mss is None or np is None:
             return None, {"source": "none"}
-
-        if slot_bbox is not None and slot_width > 0 and slot_height > 0:
+        slot_bbox = self._normalize_slot_bbox(snapshot.slot_bbox)
+        if slot_bbox is not None:
+            left, top, right, bottom = slot_bbox
             monitor = {
-                "left": int(snapshot.monitor_left + slot_offset_x),
-                "top": int(snapshot.monitor_top + slot_offset_y),
-                "width": int(slot_width),
-                "height": int(slot_height),
+                "left": int(round(left)),
+                "top": int(round(top)),
+                "width": max(1, int(round(right - left))),
+                "height": max(1, int(round(bottom - top))),
             }
-            try:
-                with mss.mss() as sct:
-                    shot = sct.grab(monitor)
-                frame = np.array(shot)
-                if frame.ndim == 3 and frame.shape[2] == 4:
-                    frame = frame[:, :, :3]
-                return frame, {
-                    "source": "mss_slot_crop",
-                    "slot_local_bbox": [slot_offset_x, slot_offset_y, slot_offset_x + slot_width, slot_offset_y + slot_height],
-                    "slot_global_offset": [monitor["left"], monitor["top"]],
-                    "frame_kind": "slot_crop",
-                    **monitor,
-                }
-            except Exception as exc:
-                return None, {"source": "capture_error", "error": str(exc), "frame_kind": "slot_crop"}
-
-        if width <= 0 or height <= 0:
-            return None, {"source": "none"}
-        monitor = {
-            "left": int(snapshot.monitor_left),
-            "top": int(snapshot.monitor_top),
-            "width": width,
-            "height": height,
-        }
+            source_name = "mss_slot_crop"
+        else:
+            width = int(snapshot.monitor_width or 0)
+            height = int(snapshot.monitor_height or 0)
+            if width <= 0 or height <= 0:
+                return None, {"source": "none"}
+            monitor = {
+                "left": int(snapshot.monitor_left),
+                "top": int(snapshot.monitor_top),
+                "width": width,
+                "height": height,
+            }
+            source_name = "mss"
         try:
             with mss.mss() as sct:
                 shot = sct.grab(monitor)
             frame = np.array(shot)
             if frame.ndim == 3 and frame.shape[2] == 4:
                 frame = frame[:, :, :3]
-            return frame, {"source": "mss_full_frame", "slot_global_offset": [monitor["left"], monitor["top"]], "frame_kind": "full_frame", **monitor}
+            return frame, {
+                "source": source_name,
+                **monitor,
+                "slot_id": snapshot.slot_id,
+                "slot_bbox": list(slot_bbox) if slot_bbox is not None else None,
+                "coordinates": "slot_local" if slot_bbox is not None else "global",
+            }
         except Exception as exc:
-            return None, {"source": "capture_error", "error": str(exc), "frame_kind": "full_frame"}
+            return None, {"source": "capture_error", "error": str(exc)}
 
     def _event(self, name: str, **payload: object) -> AutoClickEvent:
         return AutoClickEvent(name=name, ts=time.time(), payload={str(k): _json_safe(v) for k, v in payload.items()})
@@ -1198,66 +1171,64 @@ class AutoClickRuntime:
             events=events,
         )
 
-    def _prepare_detections(
-        self,
-        items: Sequence[Any],
-        snapshot: AutoClickSnapshot,
-        capture_meta: Optional[Dict[str, object]] = None,
-    ) -> List[ButtonDetection]:
+    def _prepare_detections(self, items: Sequence[Any], snapshot: AutoClickSnapshot) -> List[ButtonDetection]:
         now_ts = time.time()
         detections: List[ButtonDetection] = []
-        capture_meta = capture_meta or {}
-        offset = capture_meta.get("slot_global_offset") or [int(snapshot.monitor_left), int(snapshot.monitor_top)]
-        try:
-            global_offset_x = float(offset[0])
-            global_offset_y = float(offset[1])
-        except Exception:
-            global_offset_x = float(snapshot.monitor_left)
-            global_offset_y = float(snapshot.monitor_top)
+        uses_slot_local = self._snapshot_uses_slot_local_coordinates(snapshot)
         for item in items:
             if isinstance(item, ButtonDetection):
-                raw_bbox = tuple(float(v) for v in (item.local_bbox or item.bbox))
-                canonical_name = item.class_name
-                confidence = float(item.confidence)
+                raw_bbox = tuple(float(v) for v in item.bbox)
+                if len(raw_bbox) != 4:
+                    continue
                 source_class_name = item.source_class_name
+                confidence = float(item.confidence)
                 frame_ts = float(item.frame_ts)
+                class_name = item.class_name
             else:
                 raw_name = getattr(item, "class_name", None) or getattr(item, "name", None) or getattr(item, "label", None)
-                canonical_name = canonicalize_button_class_name(raw_name)
-                if canonical_name is None:
+                canonical = canonicalize_button_class_name(raw_name)
+                if canonical is None:
                     continue
                 raw_bbox = tuple(float(v) for v in getattr(item, "bbox", (0.0, 0.0, 0.0, 0.0)))
                 if len(raw_bbox) != 4:
                     continue
-                confidence = float(getattr(item, "confidence", 0.0))
                 source_class_name = str(raw_name) if raw_name is not None else None
+                confidence = float(getattr(item, "confidence", 0.0))
                 frame_ts = float(getattr(item, "frame_ts", now_ts))
-            if len(raw_bbox) != 4:
-                continue
-            lx1, ly1, lx2, ly2 = raw_bbox
-            gx1 = global_offset_x + lx1
-            gy1 = global_offset_y + ly1
-            gx2 = global_offset_x + lx2
-            gy2 = global_offset_y + ly2
+                class_name = canonical
+
+            # Button detections produced on a slot crop are local to that crop.
+            # Convert them once here, before any mouse target is generated.
+            local_bbox = raw_bbox if uses_slot_local else None
+            global_bbox = self._translate_local_bbox_to_global(raw_bbox, snapshot)
+            bbox = global_bbox if uses_slot_local else raw_bbox
+            x1, y1, x2, y2 = bbox
+
+            # action_panel_bbox belongs to the same frame space as the input detector.
+            # In slot-crop mode it is local; in full-frame mode it is global.
+            if snapshot.action_panel_bbox is not None:
+                panel_bbox = tuple(float(v) for v in snapshot.action_panel_bbox)
+                panel_check_bbox = raw_bbox if uses_slot_local else bbox
+                if not self._bbox_inside_panel(panel_check_bbox, panel_bbox):
+                    continue
+
             det = ButtonDetection(
-                class_name=canonical_name,
+                class_name=class_name,
                 confidence=confidence,
-                bbox=(gx1, gy1, gx2, gy2),
-                center_x=(gx1 + gx2) / 2.0,
-                center_y=(gy1 + gy2) / 2.0,
+                bbox=bbox,
+                center_x=(x1 + x2) / 2.0,
+                center_y=(y1 + y2) / 2.0,
                 frame_ts=frame_ts,
                 source_class_name=source_class_name,
-                local_bbox=(lx1, ly1, lx2, ly2),
-                local_center_x=(lx1 + lx2) / 2.0,
-                local_center_y=(ly1 + ly2) / 2.0,
+                local_bbox=local_bbox,
+                global_bbox=bbox,
+                coordinate_space="global_from_slot_local" if uses_slot_local else "global",
+                slot_id=snapshot.slot_id,
             )
             if (now_ts - float(det.frame_ts)) * 1000.0 > float(self.config.button_detection_ttl_ms):
                 continue
-            if snapshot.action_panel_bbox is not None:
-                panel = tuple(float(v) for v in snapshot.action_panel_bbox)
-                local_bbox = det.local_bbox or det.bbox
-                if not self._bbox_inside_panel(local_bbox, panel):
-                    continue
+            if snapshot.slot_bbox is not None and not self._bbox_inside_slot(det.bbox, snapshot):
+                continue
             conf_threshold = self._threshold_for_button(det.class_name)
             if det.confidence < conf_threshold:
                 continue
@@ -1396,6 +1367,11 @@ class AutoClickRuntime:
 
     def _extract_runtime_meta(self, snapshot: AutoClickSnapshot) -> Dict[str, object]:
         meta = dict(snapshot.solver_context_meta or {})
+        if snapshot.slot_id:
+            meta.setdefault("slot_id", snapshot.slot_id)
+        if snapshot.slot_bbox is not None:
+            meta.setdefault("slot_bbox", [float(v) for v in snapshot.slot_bbox])
+            meta.setdefault("slot_global_offset", [float(snapshot.slot_global_offset[0]), float(snapshot.slot_global_offset[1])])
         decision = snapshot.hero_decision
         debug = getattr(decision, "debug", {}) or {}
         if isinstance(debug, dict):
@@ -1524,7 +1500,6 @@ class AutoClickRuntime:
             debug.get("source_frame_id") if isinstance(debug, dict) else None,
             meta.get("source_frame_id"),
         )
-        slot_id = self._normalize_slot_key(getattr(snapshot, "slot_id", meta.get("slot_id")))
         hand_id = _first_non_empty(snapshot.hand_id, meta.get("hand_id"))
         street = _first_non_empty(snapshot.street, getattr(decision, "street", None), meta.get("street"))
         guard_key = decision_id if decision_id else f"execution_token:{execution_token}"
@@ -1533,7 +1508,6 @@ class AutoClickRuntime:
             "decision_id": decision_id,
             "solver_fingerprint": solver_fingerprint,
             "source_frame_id": source_frame_id,
-            "slot_id": slot_id,
             "hand_id": hand_id,
             "street": street,
             "plan_name": plan.plan_name,
@@ -1559,7 +1533,6 @@ class AutoClickRuntime:
             self._event(
                 "decision_id_recorded_after_success",
                 decision_id=self.last_executed_decision_id or "",
-                slot_id=_first_non_empty(decision_memory.get("slot_id")) or "",
                 solver_fingerprint=self.last_executed_solver_fingerprint or "",
                 source_frame_id=self.last_executed_source_frame_id or "",
                 hand_id=self.last_executed_hand_id or "",
@@ -1576,7 +1549,6 @@ class AutoClickRuntime:
         debug = getattr(decision, "debug", {}) or {}
         meta = dict(snapshot.solver_context_meta or {})
         token_payload = {
-            "slot_id": self._normalize_slot_key(getattr(snapshot, "slot_id", None) or snapshot.slot_id),
             "hand_id": snapshot.hand_id,
             "street": snapshot.street,
             "solver_fingerprint": _first_non_empty(
@@ -1632,7 +1604,8 @@ class AutoClickRuntime:
             if primary is None:
                 return False
         self.state = STATE_EXECUTING_PLAN
-        self._click_detection(primary, snapshot, events, role="primary")
+        if not self._click_detection(primary, events, role="primary", snapshot=snapshot):
+            return False
         if plan.allow_scroll_between:
             self._maybe_scroll(events)
         if plan.secondary_button:
@@ -1645,7 +1618,8 @@ class AutoClickRuntime:
             if secondary is None:
                 events.append(self._event("critical_click_failure", reason="secondary_button_missing", button=plan.secondary_button))
                 return False
-            self._click_detection(secondary, snapshot, events, role="secondary")
+            if not self._click_detection(secondary, events, role="secondary", snapshot=snapshot):
+                return False
         self.post_click_until = time.monotonic() + self.rng.uniform(
             float(self.config.post_click_cooldown_sec_min),
             float(self.config.post_click_cooldown_sec_max),
@@ -1664,7 +1638,7 @@ class AutoClickRuntime:
             time.sleep(sleep_ms / 1000.0)
             frame, capture_meta = self._get_detection_frame(snapshot, None)
             raw = self.button_detector.detect_buttons(frame) if frame is not None else []
-            prepared = self._prepare_detections(raw, snapshot, capture_meta)
+            prepared = self._prepare_detections(raw, snapshot)
             self._write_debug_observation(snapshot, frame, raw, prepared, capture_meta, events=events)
             found = self._find_button(prepared, class_name)
             events.append(self._event("button_retry", button=class_name, attempt=attempt, found=bool(found)))
@@ -1684,26 +1658,33 @@ class AutoClickRuntime:
             time.sleep(pause_ms / 1000.0)
         events.append(self._event("scroll_applied", steps=steps, amount=amount))
 
-    def _slot_global_bbox(self, snapshot: AutoClickSnapshot) -> Optional[Tuple[int, int, int, int]]:
-        slot_bbox = getattr(snapshot, "slot_bbox", None)
-        if slot_bbox is None or len(slot_bbox) != 4:
-            return None
-        try:
-            sx1, sy1, sx2, sy2 = [int(v) for v in slot_bbox]
-            return (
-                int(snapshot.monitor_left + sx1),
-                int(snapshot.monitor_top + sy1),
-                int(snapshot.monitor_left + sx2),
-                int(snapshot.monitor_top + sy2),
+    def _click_detection(
+        self,
+        detection: ButtonDetection,
+        events: List[AutoClickEvent],
+        *,
+        role: str,
+        snapshot: Optional[AutoClickSnapshot] = None,
+    ) -> bool:
+        target_x, target_y = self._pick_click_target(detection)
+        if snapshot is not None and not self._point_inside_slot(target_x, target_y, snapshot):
+            events.append(
+                self._event(
+                    "click_blocked_outside_slot_region",
+                    role=role,
+                    button=detection.class_name,
+                    click_x=target_x,
+                    click_y=target_y,
+                    bbox=[round(v, 2) for v in detection.bbox],
+                    local_bbox=[round(v, 2) for v in detection.local_bbox] if detection.local_bbox is not None else None,
+                    global_bbox=[round(v, 2) for v in (detection.global_bbox or detection.bbox)],
+                    slot_id=snapshot.slot_id,
+                    slot_bbox=list(snapshot.slot_bbox) if snapshot.slot_bbox is not None else None,
+                )
             )
-        except Exception:
-            return None
+            return False
 
-    def _click_detection(self, detection: ButtonDetection, snapshot: AutoClickSnapshot, events: List[AutoClickEvent], *, role: str) -> None:
-        target_x, target_y = self._pick_click_target(detection, snapshot)
         duration_ms = self.rng.randint(int(self.config.move_duration_ms_min), int(self.config.move_duration_ms_max))
-        self._move_mouse_human(target_x, target_y, duration_ms)
-        down_up_ms = self.rng.randint(int(self.config.click_down_up_delay_ms_min), int(self.config.click_down_up_delay_ms_max))
         events.append(
             self._event(
                 "mouse_move_started",
@@ -1711,11 +1692,15 @@ class AutoClickRuntime:
                 target_x=target_x,
                 target_y=target_y,
                 duration_ms=duration_ms,
-                slot_id=snapshot.slot_id,
-                local_bbox=[round(v, 2) for v in (detection.local_bbox or detection.bbox)],
-                global_bbox=[round(v, 2) for v in detection.bbox],
+                bbox=[round(v, 2) for v in detection.bbox],
+                local_bbox=[round(v, 2) for v in detection.local_bbox] if detection.local_bbox is not None else None,
+                global_bbox=[round(v, 2) for v in (detection.global_bbox or detection.bbox)],
+                coordinate_space=detection.coordinate_space,
+                slot_id=detection.slot_id,
             )
         )
+        self._move_mouse_human(target_x, target_y, duration_ms)
+        down_up_ms = self.rng.randint(int(self.config.click_down_up_delay_ms_min), int(self.config.click_down_up_delay_ms_max))
         self.mouse.left_down()
         time.sleep(down_up_ms / 1000.0)
         self.mouse.left_up()
@@ -1726,15 +1711,18 @@ class AutoClickRuntime:
                 role=role,
                 button=detection.class_name,
                 confidence=round(float(detection.confidence), 4),
-                slot_id=snapshot.slot_id,
                 click_x=target_x,
                 click_y=target_y,
-                local_bbox=[round(v, 2) for v in (detection.local_bbox or detection.bbox)],
-                global_bbox=[round(v, 2) for v in detection.bbox],
+                bbox=[round(v, 2) for v in detection.bbox],
+                local_bbox=[round(v, 2) for v in detection.local_bbox] if detection.local_bbox is not None else None,
+                global_bbox=[round(v, 2) for v in (detection.global_bbox or detection.bbox)],
+                coordinate_space=detection.coordinate_space,
+                slot_id=detection.slot_id,
             )
         )
+        return True
 
-    def _pick_click_target(self, detection: ButtonDetection, snapshot: AutoClickSnapshot) -> Tuple[int, int]:
+    def _pick_click_target(self, detection: ButtonDetection) -> Tuple[int, int]:
         x1, y1, x2, y2 = detection.bbox
         left = int(math.floor(min(x1, x2)))
         top = int(math.floor(min(y1, y2)))
@@ -1764,32 +1752,12 @@ class AutoClickRuntime:
         if safe_top >= safe_bottom:
             safe_top, safe_bottom = top, bottom
 
-        slot_global_bbox = self._slot_global_bbox(snapshot)
-        if slot_global_bbox is not None:
-            sgx1, sgy1, sgx2, sgy2 = slot_global_bbox
-            safe_left = max(safe_left, sgx1)
-            safe_top = max(safe_top, sgy1)
-            safe_right = min(safe_right, sgx2)
-            safe_bottom = min(safe_bottom, sgy2)
-            if safe_left >= safe_right:
-                safe_left = max(left, sgx1)
-                safe_right = min(right, sgx2)
-            if safe_top >= safe_bottom:
-                safe_top = max(top, sgy1)
-                safe_bottom = min(bottom, sgy2)
-            if safe_left >= safe_right or safe_top >= safe_bottom:
-                safe_left, safe_top, safe_right, safe_bottom = left, top, right, bottom
-
         target_x = self.rng.randint(int(safe_left), int(max(safe_left, safe_right)))
         target_y = self.rng.randint(int(safe_top), int(max(safe_top, safe_bottom)))
         jitter_x = self.rng.randint(int(self.config.target_jitter_px_min), int(self.config.target_jitter_px_max))
         jitter_y = self.rng.randint(int(self.config.target_jitter_px_min), int(self.config.target_jitter_px_max))
         target_x = self._clamp_to_bounds(target_x + self.rng.randint(-jitter_x, jitter_x), int(safe_left), int(max(safe_left, safe_right)))
         target_y = self._clamp_to_bounds(target_y + self.rng.randint(-jitter_y, jitter_y), int(safe_top), int(max(safe_top, safe_bottom)))
-        if slot_global_bbox is not None:
-            sgx1, sgy1, sgx2, sgy2 = slot_global_bbox
-            target_x = self._clamp_to_bounds(int(target_x), int(sgx1), int(sgx2))
-            target_y = self._clamp_to_bounds(int(target_y), int(sgy1), int(sgy2))
         return int(target_x), int(target_y)
 
     def _get_virtual_screen_bounds(self) -> Tuple[int, int, int, int]:
@@ -1926,6 +1894,7 @@ class AutoClickRuntime:
                 "event_name": item["name"],
                 "event_payload": item["payload"],
                 "slot_id": snapshot.slot_id,
+                "slot_bbox": list(snapshot.slot_bbox) if snapshot.slot_bbox is not None else None,
                 "hand_id": snapshot.hand_id,
                 "street": snapshot.street,
                 "channel": channel,
@@ -1948,6 +1917,7 @@ class AutoClickRuntime:
         payload = {
             "ts": time.time(),
             "slot_id": snapshot.slot_id,
+            "slot_bbox": list(snapshot.slot_bbox) if snapshot.slot_bbox is not None else None,
             "hand_id": snapshot.hand_id,
             "street": snapshot.street,
             "capture_meta": capture_meta,
@@ -1976,6 +1946,7 @@ class AutoClickRuntime:
         payload = {
             "ts": time.time(),
             "slot_id": snapshot.slot_id,
+            "slot_bbox": list(snapshot.slot_bbox) if snapshot.slot_bbox is not None else None,
             "hand_id": snapshot.hand_id,
             "street": snapshot.street,
             "plan_name": plan.plan_name,
@@ -2013,14 +1984,15 @@ class AutoClickRuntime:
         return {
             "class_name": detection.class_name,
             "confidence": float(detection.confidence),
-            "global_bbox": list(detection.bbox),
-            "local_bbox": list(detection.local_bbox) if detection.local_bbox is not None else None,
+            "bbox": list(detection.bbox),
             "center_x": float(detection.center_x),
             "center_y": float(detection.center_y),
-            "local_center_x": float(detection.local_center_x) if detection.local_center_x is not None else None,
-            "local_center_y": float(detection.local_center_y) if detection.local_center_y is not None else None,
             "frame_ts": float(detection.frame_ts),
             "source_class_name": detection.source_class_name,
+            "local_bbox": list(detection.local_bbox) if detection.local_bbox is not None else None,
+            "global_bbox": list(detection.global_bbox) if detection.global_bbox is not None else list(detection.bbox),
+            "coordinate_space": detection.coordinate_space,
+            "slot_id": detection.slot_id,
         }
 
 
