@@ -1864,6 +1864,8 @@ class IntegratedRunner:
         self.selected_slot_id = _slot_id_from_view(getattr(args, "slot_view", 1))
         self.slot_contexts: Dict[str, SlotContext] = {}
         self.slot_states: Dict[str, SlotRuntimeState] = {}
+        self._round_robin_cursor = SLOT_IDS.index(self.selected_slot_id) if self.selected_slot_id in SLOT_IDS else 0
+        self._last_processed_slot_id: Optional[str] = None
         self._bootstrap_slot_runtime()
         self.hand_manager = HandStateManager(
             self.settings.schema_version,
@@ -1918,9 +1920,99 @@ class IntegratedRunner:
             slot_frames[slot_id] = self._build_slot_frame(frame, slot_id)
         return slot_frames
 
-    def _select_processing_slot_id(self) -> str:
-        return self.selected_slot_id
+    def _iter_slot_ids_from_cursor(self) -> Iterable[str]:
+        total = len(SLOT_IDS)
+        if total <= 0:
+            return []
+        start = int(self._round_robin_cursor) % total
+        return [SLOT_IDS[(start + offset) % total] for offset in range(total)]
 
+    def _advance_round_robin_cursor(self, processed_slot_id: Optional[str] = None) -> None:
+        total = len(SLOT_IDS)
+        if total <= 0:
+            self._round_robin_cursor = 0
+            return
+        if processed_slot_id in SLOT_IDS:
+            self._round_robin_cursor = (SLOT_IDS.index(str(processed_slot_id)) + 1) % total
+            return
+        self._round_robin_cursor = (int(self._round_robin_cursor) + 1) % total
+
+    def _detect_active_hero_fast(self, slot_frame) -> List[Any]:
+        try:
+            detections = list(self.detector.detect_active_hero(slot_frame) or [])
+        except Exception:
+            return []
+        out: List[Any] = []
+        for detection in detections:
+            label = str(getattr(detection, "label", "") or "").strip().lower().replace("_", "")
+            if label in {"activehero", "heroactive"}:
+                out.append(detection)
+        return out
+
+    def _select_processing_slot(self, slot_frames: Dict[str, Any]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+        scan_summary: List[Dict[str, Any]] = []
+        chosen_slot_id: Optional[str] = None
+        now = time.monotonic()
+        for slot_id in self._iter_slot_ids_from_cursor():
+            slot_frame = slot_frames.get(slot_id)
+            detections = self._detect_active_hero_fast(slot_frame)
+            active = bool(detections)
+            scan_summary.append({
+                "slot_id": slot_id,
+                "active_hero_found": active,
+                "active_hero_count": len(detections),
+            })
+            slot_state = self.slot_states.get(slot_id)
+            if slot_state is not None:
+                slot_state.last_frame_ts = getattr(slot_frame, "timestamp", None) if slot_frame is not None else None
+                slot_state.is_active = active
+                if active:
+                    slot_state.last_active_hero_seen_at = now
+            if active and chosen_slot_id is None:
+                chosen_slot_id = slot_id
+                break
+        self._advance_round_robin_cursor(chosen_slot_id)
+        if chosen_slot_id is not None:
+            self._last_processed_slot_id = chosen_slot_id
+        return chosen_slot_id, scan_summary
+
+    def _build_idle_result(self, frame, scan_summary: List[Dict[str, Any]]):
+        display_slot_id = self.selected_slot_id if self.selected_slot_id in SLOT_IDS else DEFAULT_SLOT_ID
+        display_frame = frame
+        analysis = SimpleNamespace(
+            frame_id=str(getattr(display_frame, "frame_id", "frame_unknown") or "frame_unknown"),
+            street="preflop",
+            hero_cards=[],
+            board_cards=[],
+            errors=[],
+            warnings=[],
+            active_hero_found=False,
+            slot_scan_summary=list(scan_summary),
+        )
+        result = SimpleNamespace(
+            analysis=analysis,
+            hand=None,
+            render_state=None,
+        )
+        recommendation_payload = {
+            "title": "WAITING ACTIVEHERO",
+            "action": "—",
+            "reason": "No ActiveHero detected in any slot on this pass",
+            "street": "preflop",
+            "confidence": None,
+            "debug": {"slot_scan_summary": list(scan_summary)},
+            "analysis_text": "",
+        }
+        analysis_lines = [
+            "No ActiveHero detected in any slot on this pass.",
+            "Round-robin quick gate:",
+        ]
+        analysis_lines.extend(
+            f"- {item['slot_id']}: active_hero_found={item['active_hero_found']} count={item['active_hero_count']}"
+            for item in scan_summary
+        )
+        analysis_text = "\n".join(analysis_lines)
+        return display_frame, result, recommendation_payload, analysis_text
 
     def _build_auto_click_runtime(self, args):
         if not getattr(args, "autoclick", False):
@@ -2206,7 +2298,74 @@ class IntegratedRunner:
     def process_once(self):
         full_frame = self.source.next_frame()
         slot_frames = self._build_slot_frames(full_frame)
-        processing_slot_id = self._select_processing_slot_id()
+        processing_slot_id, scan_summary = self._select_processing_slot(slot_frames)
+
+        if processing_slot_id is None:
+            display_frame = slot_frames.get(self.selected_slot_id) or self._build_slot_frame(full_frame, self.selected_slot_id)
+            frame, result, recommendation_payload, analysis_text = self._build_idle_result(display_frame, scan_summary)
+            decision = None
+            exception_text = ""
+            auto_click_result = None
+            existing_render_state = None
+            if self.auto_click_runtime is not None:
+                try:
+                    frame_for_autoclick = self._normalize_frame_for_autoclick(getattr(full_frame, "image", None))
+                    frame_width = 0
+                    frame_height = 0
+                    if frame_for_autoclick is not None and hasattr(frame_for_autoclick, "shape") and len(frame_for_autoclick.shape) >= 2:
+                        frame_height = int(frame_for_autoclick.shape[0])
+                        frame_width = int(frame_for_autoclick.shape[1])
+                    snapshot = self.auto_click_runtime.build_snapshot_from_launcher(
+                        active_hero_present=False,
+                        hero_decision=None,
+                        decision_ready=False,
+                        decision_started_at=time.monotonic(),
+                        hand=None,
+                        critical_error_flag=False,
+                        critical_error_text=None,
+                        action_panel_bbox=None,
+                        monitor_width=frame_width,
+                        monitor_height=frame_height,
+                    )
+                    auto_click_result = self.auto_click_runtime.step(snapshot, frame_bgr=frame_for_autoclick)
+                except Exception:
+                    auto_click_trace = traceback.format_exc(limit=8)
+                    exception_text = auto_click_trace
+                    analysis_text = f"{analysis_text}\n\n=== AUTOCLICK EXCEPTION ===\n{auto_click_trace}" if analysis_text else auto_click_trace
+                    auto_click_result = self._auto_click_result_to_dict(None)
+                    if isinstance(auto_click_result, dict):
+                        auto_click_result["state"] = "ERROR"
+                        auto_click_result["events"] = [
+                            {
+                                "name": "autoclick_exception",
+                                "ts": time.monotonic(),
+                                "payload": {"error": auto_click_trace.splitlines()[-1] if auto_click_trace else "autoclick exception"},
+                            }
+                        ]
+            auto_click_payload = self._auto_click_result_to_dict(auto_click_result) if not isinstance(auto_click_result, dict) else auto_click_result
+            if auto_click_payload.get("enabled"):
+                analysis_text = (
+                    f"{analysis_text}\n\n=== AUTOCLICK ===\n"
+                    f"State: {auto_click_payload.get('state')}\n"
+                    f"Plan: {auto_click_payload.get('plan_name') or '-'}\n"
+                    f"Normalized: {auto_click_payload.get('normalized_action') or '-'}\n"
+                    f"Raw: {auto_click_payload.get('raw_action') or '-'}\n"
+                    f"Executed: {auto_click_payload.get('executed')} | Locked: {auto_click_payload.get('locked')}"
+                ).strip()
+                recommendation_payload["analysis_text"] = analysis_text
+            render_state = None
+            status = {
+                "frame_id": result.analysis.frame_id,
+                "street": result.analysis.street,
+                "errors": [],
+                "recommendation": dict(recommendation_payload),
+                "analysis_text": analysis_text,
+                "exception": exception_text,
+                "auto_click": dict(auto_click_payload),
+                "slot_scan_summary": list(scan_summary),
+            }
+            return frame, result, decision, render_state, status
+
         frame = slot_frames.get(processing_slot_id) or self._build_slot_frame(full_frame, processing_slot_id)
         if hasattr(self.storage, "set_active_slot"):
             self.storage.set_active_slot(processing_slot_id)
@@ -2250,6 +2409,13 @@ class IntegratedRunner:
                 "analysis_text": analysis_text,
             }
 
+        quick_gate_note = "Round-robin quick gate:\n" + "\n".join(
+            f"- {item['slot_id']}: active_hero_found={item['active_hero_found']} count={item['active_hero_count']}"
+            for item in scan_summary
+        )
+        analysis_text = f"{analysis_text}\n\n=== SLOT GATE ===\nProcessed slot: {processing_slot_id}\n{quick_gate_note}".strip()
+        recommendation_payload["analysis_text"] = analysis_text
+
         if self.auto_click_runtime is not None:
             try:
                 frame_for_autoclick = self._normalize_frame_for_autoclick(getattr(full_frame, "image", None))
@@ -2268,9 +2434,6 @@ class IntegratedRunner:
                 if autoclick_reason:
                     note = f"AUTOCLICK_DECISION_OVERRIDE: {autoclick_reason}"
                     analysis_text = f"{analysis_text}\n\n{note}" if analysis_text else note
-                # Keep launcher autoclick on the full primary-monitor frame. The old inferred
-                # panel crop was repeatedly excluding Raise/Call buttons and leaving only false
-                # FOLD detections. Heuristic crops still exist inside the runtime as fallback.
                 action_panel_bbox = None
                 snapshot = self.auto_click_runtime.build_snapshot_from_launcher(
                     active_hero_present=active_hero_present,
@@ -2317,6 +2480,8 @@ class IntegratedRunner:
 
         render_state = self._inject_recommendation(result, recommendation_payload, auto_click_payload=auto_click_payload)
         status = self._build_status(result, recommendation_payload, analysis_text=analysis_text, exception_text=exception_text, auto_click_payload=auto_click_payload)
+        status["slot_scan_summary"] = list(scan_summary)
+        status["processed_slot_id"] = processing_slot_id
         return frame, result, decision, render_state, status
 
 
