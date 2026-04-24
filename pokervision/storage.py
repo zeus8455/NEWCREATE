@@ -12,78 +12,55 @@ from .config import Settings
 from .models import PipelineArtifacts
 
 
+MULTI_TABLE_SLOT_IDS = tuple(f"table_{index:02d}" for index in range(1, 7))
+DEFAULT_SLOT_ID = MULTI_TABLE_SLOT_IDS[0]
+
+
 def _hand_number_suffix(hand_id: str) -> str:
     raw = str(hand_id or "").strip()
     tail = raw.split("_")[-1] if raw else ""
     return tail or raw or "unknown"
 
 
-SLOT_IDS = tuple(f"table_{index:02d}" for index in range(1, 7))
-DEFAULT_SLOT_ID = SLOT_IDS[0]
-SLOT_SUBDIRS = ("hands", "temp", "render", "logs")
-
-
-def _normalize_slot_id(slot_id: Optional[str]) -> str:
-    candidate = str(slot_id or DEFAULT_SLOT_ID).strip()
-    if candidate not in SLOT_IDS:
-        raise KeyError(f"Unknown slot_id: {candidate}")
-    return candidate
-
-
-def resolve_slot_paths(base_root: Path | str, slot_id: str) -> dict[str, Path]:
-    normalized = _normalize_slot_id(slot_id)
-    root = Path(base_root).expanduser().resolve()
-    slot_root = root / "tables" / normalized
-    return {
-        "slot_root": slot_root,
-        "hands": slot_root / "hands",
-        "temp": slot_root / "temp",
-        "render": slot_root / "render",
-        "logs": slot_root / "logs",
-    }
-
-
 class StorageManager:
-    def __init__(self, settings: Settings, slot_id: str = DEFAULT_SLOT_ID):
+    def __init__(self, settings: Settings):
         self.settings = settings
-        self.slot_id = _normalize_slot_id(slot_id)
-        self._slot_paths = resolve_slot_paths(self.settings.root_dir, self.slot_id)
+        self.active_slot_id = DEFAULT_SLOT_ID
         self._ensure_root_structure()
 
+    def set_active_slot(self, slot_id: str) -> None:
+        normalized = str(slot_id or DEFAULT_SLOT_ID).strip() or DEFAULT_SLOT_ID
+        if normalized not in MULTI_TABLE_SLOT_IDS:
+            normalized = DEFAULT_SLOT_ID
+        self.active_slot_id = normalized
+
+    def resolve_slot_paths(self, slot_id: Optional[str] = None) -> dict[str, Path]:
+        normalized = str(slot_id or self.active_slot_id or DEFAULT_SLOT_ID).strip() or DEFAULT_SLOT_ID
+        if normalized not in MULTI_TABLE_SLOT_IDS:
+            normalized = DEFAULT_SLOT_ID
+        slot_root = self.settings.root_dir / "tables" / normalized
+        return {
+            "slot_root": slot_root,
+            "hands": slot_root / "hands",
+            "logs": slot_root / "logs",
+            "temp": slot_root / "temp",
+            "render": slot_root / "render",
+        }
+
     def _ensure_root_structure(self) -> None:
-        root = Path(self.settings.root_dir).expanduser().resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        tables_root = root / "tables"
+        self.settings.root_dir.mkdir(parents=True, exist_ok=True)
+        tables_root = self.settings.root_dir / "tables"
         tables_root.mkdir(parents=True, exist_ok=True)
-
-        for slot_id in SLOT_IDS:
-            paths = resolve_slot_paths(root, slot_id)
-            paths["slot_root"].mkdir(parents=True, exist_ok=True)
-            paths["hands"].mkdir(parents=True, exist_ok=True)
-            paths["logs"].mkdir(parents=True, exist_ok=True)
-            temp_dir = paths["temp"]
-            if temp_dir.exists() and not self.settings.keep_temp_on_exit:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            paths["render"].mkdir(parents=True, exist_ok=True)
-
-        self._slot_paths = resolve_slot_paths(root, self.slot_id)
-
-    def set_slot_id(self, slot_id: str) -> None:
-        self.slot_id = _normalize_slot_id(slot_id)
-        self._slot_paths = resolve_slot_paths(self.settings.root_dir, self.slot_id)
-        self._slot_paths["slot_root"].mkdir(parents=True, exist_ok=True)
-        for name in SLOT_SUBDIRS:
-            self._slot_paths[name].mkdir(parents=True, exist_ok=True)
-
-    def slot_paths(self, slot_id: Optional[str] = None) -> dict[str, Path]:
-        normalized = _normalize_slot_id(slot_id or self.slot_id)
-        if normalized == self.slot_id:
-            return dict(self._slot_paths)
-        return resolve_slot_paths(self.settings.root_dir, normalized)
+        for slot_id in MULTI_TABLE_SLOT_IDS:
+            paths = self.resolve_slot_paths(slot_id)
+            for key in ("hands", "logs", "temp", "render"):
+                paths[key].mkdir(parents=True, exist_ok=True)
+            if paths["temp"].exists() and not self.settings.keep_temp_on_exit:
+                shutil.rmtree(paths["temp"], ignore_errors=True)
+                paths["temp"].mkdir(parents=True, exist_ok=True)
 
     def hand_dir(self, hand_id: str) -> Path:
-        path = self._slot_paths["hands"] / hand_id
+        path = self.resolve_slot_paths()["hands"] / hand_id
         for sub in [
             path / "raw_frames",
             path / "overlays",
@@ -98,7 +75,7 @@ class StorageManager:
         return path
 
     def failure_dir(self, stage: str, frame_id: str) -> Path:
-        path = self._slot_paths["temp"] / "failed_frames" / stage / frame_id
+        path = self.resolve_slot_paths()["temp"] / "failed_frames" / stage / frame_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 

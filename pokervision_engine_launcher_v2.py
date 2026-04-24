@@ -20,6 +20,7 @@ from __future__ import annotations
 """
 
 import argparse
+import copy
 import ast
 import json
 import re
@@ -109,19 +110,54 @@ STREET_ORDER = ["preflop", "flop", "turn", "river"]
 POSTFLOP_STREETS = ["flop", "turn", "river"]
 
 REGIONS = [
-    (63, 93, 875, 681),    # table_01
-    (875, 93, 1686, 681),  # table_02
-    (1686, 93, 2498, 681), # table_03
-    (63, 681, 875, 1269),  # table_04
-    (875, 681, 1686, 1269),# table_05
-    (1686, 681, 2498, 1269),# table_06
+    (63, 93, 875, 681),      # table_01
+    (875, 93, 1686, 681),    # table_02
+    (1686, 93, 2498, 681),   # table_03
+    (63, 681, 875, 1269),    # table_04
+    (875, 681, 1686, 1269),  # table_05
+    (1686, 681, 2498, 1269), # table_06
 ]
 SLOT_IDS = tuple(f"table_{index:02d}" for index in range(1, len(REGIONS) + 1))
+SLOT_BBOX_BY_ID = {slot_id: REGIONS[index] for index, slot_id in enumerate(SLOT_IDS)}
 DEFAULT_SLOT_ID = SLOT_IDS[0]
-SLOT_SUBDIR_NAMES = ("hands", "temp", "render", "logs")
 
 
-@dataclass(slots=True, frozen=True)
+def get_slot_bbox(slot_id: str) -> Tuple[int, int, int, int]:
+    normalized = str(slot_id or DEFAULT_SLOT_ID).strip() or DEFAULT_SLOT_ID
+    if normalized not in SLOT_BBOX_BY_ID:
+        raise KeyError(f"Unknown slot_id: {normalized}")
+    return tuple(int(value) for value in SLOT_BBOX_BY_ID[normalized])
+
+
+def iter_slots_round_robin() -> Iterable[str]:
+    for slot_id in SLOT_IDS:
+        yield slot_id
+
+
+def _slot_id_from_view(slot_view: Any) -> str:
+    try:
+        index = int(slot_view)
+    except Exception:
+        index = 1
+    if index < 1:
+        index = 1
+    if index > len(SLOT_IDS):
+        index = len(SLOT_IDS)
+    return SLOT_IDS[index - 1]
+
+
+def resolve_slot_paths(root_dir: Path, slot_id: str) -> Dict[str, Path]:
+    slot_root = Path(root_dir) / "tables" / str(slot_id)
+    return {
+        "slot_root": slot_root,
+        "hands": slot_root / "hands",
+        "temp": slot_root / "temp",
+        "render": slot_root / "render",
+        "logs": slot_root / "logs",
+    }
+
+
+@dataclass(slots=True)
 class SlotContext:
     slot_id: str
     bbox: Tuple[int, int, int, int]
@@ -130,46 +166,12 @@ class SlotContext:
 
 @dataclass(slots=True)
 class SlotRuntimeState:
-    slot_id: str
-    last_frame_ts: Optional[float] = None
+    last_frame_ts: Optional[str] = None
     last_active_hero_seen_at: Optional[float] = None
     current_hand_id: Optional[str] = None
     is_active: bool = False
     last_render_state_path: Optional[str] = None
-    last_decision_summary: Optional[Dict[str, object]] = None
-
-
-def _normalize_slot_id(slot_id: Optional[str]) -> str:
-    candidate = str(slot_id or DEFAULT_SLOT_ID).strip()
-    if candidate not in SLOT_IDS:
-        raise KeyError(f"Unknown slot_id: {candidate}")
-    return candidate
-
-
-def get_slot_bbox(slot_id: str) -> Tuple[int, int, int, int]:
-    normalized = _normalize_slot_id(slot_id)
-    return REGIONS[SLOT_IDS.index(normalized)]
-
-
-def iter_slots_round_robin(start_slot_id: Optional[str] = None) -> Iterable[str]:
-    start = _normalize_slot_id(start_slot_id)
-    start_index = SLOT_IDS.index(start)
-    for offset in range(len(SLOT_IDS)):
-        yield SLOT_IDS[(start_index + offset) % len(SLOT_IDS)]
-
-
-def resolve_slot_paths(base_root: Path | str, slot_id: str) -> Dict[str, Path]:
-    normalized = _normalize_slot_id(slot_id)
-    root = Path(base_root).expanduser().resolve()
-    slot_root = root / "tables" / normalized
-    paths: Dict[str, Path] = {
-        "slot_root": slot_root,
-        "hands": slot_root / "hands",
-        "temp": slot_root / "temp",
-        "render": slot_root / "render",
-        "logs": slot_root / "logs",
-    }
-    return paths
+    last_decision_summary: Optional[Dict[str, Any]] = None
 
 
 
@@ -1859,63 +1861,66 @@ class IntegratedRunner:
         self.source = MockFrameSource(*self.settings.mock_table_size) if args.mock else ScreenFrameSource(self.settings.monitor_index)
         self.detector = MockDetectorBackend(self.settings) if args.mock else YoloDetectorBackend(self.settings)
         self.storage = StorageManager(self.settings)
+        self.selected_slot_id = _slot_id_from_view(getattr(args, "slot_view", 1))
+        self.slot_contexts: Dict[str, SlotContext] = {}
+        self.slot_states: Dict[str, SlotRuntimeState] = {}
+        self._bootstrap_slot_runtime()
         self.hand_manager = HandStateManager(
             self.settings.schema_version,
             self.settings.hand_stale_timeout_sec,
             self.settings.hand_close_timeout_sec,
         )
-        self.slot_contexts = self._build_slot_contexts()
-        self.slot_states = self._build_slot_states()
-        self._ensure_slot_directories()
-        self._log_slot_bootstrap()
-
         self.pipeline = PokerVisionPipeline(self.settings, self.detector, self.storage, self.hand_manager)
         self.auto_click_runtime = self._build_auto_click_runtime(args)
         self._auto_click_cycle_started_at: Optional[float] = None
         self._auto_click_cycle_key: Optional[str] = None
 
+    def _bootstrap_slot_runtime(self) -> None:
+        for slot_id in iter_slots_round_robin():
+            paths = resolve_slot_paths(self.settings.root_dir, slot_id)
+            context = SlotContext(slot_id=slot_id, bbox=get_slot_bbox(slot_id), paths=paths)
+            self.slot_contexts[slot_id] = context
+            self.slot_states[slot_id] = SlotRuntimeState()
+            print(f"[MultiTable] bootstrap slot {slot_id} bbox={context.bbox}")
 
-    def _build_slot_contexts(self) -> Dict[str, SlotContext]:
-        contexts: Dict[str, SlotContext] = {}
-        base_root = Path(self.settings.root_dir)
-        for slot_id in iter_slots_round_robin(DEFAULT_SLOT_ID):
-            contexts[slot_id] = SlotContext(
-                slot_id=slot_id,
-                bbox=get_slot_bbox(slot_id),
-                paths=resolve_slot_paths(base_root, slot_id),
-            )
-        return contexts
+    def _build_slot_frame(self, frame, slot_id: str):
+        image = getattr(frame, "image", None)
+        if image is None:
+            return frame
+        x1, y1, x2, y2 = get_slot_bbox(slot_id)
+        frame_height = int(image.shape[0]) if hasattr(image, "shape") and len(image.shape) >= 2 else 0
+        frame_width = int(image.shape[1]) if hasattr(image, "shape") and len(image.shape) >= 2 else 0
+        x1 = max(0, min(frame_width, int(x1)))
+        y1 = max(0, min(frame_height, int(y1)))
+        x2 = max(0, min(frame_width, int(x2)))
+        y2 = max(0, min(frame_height, int(y2)))
+        if x2 <= x1 or y2 <= y1:
+            cropped = image.copy() if hasattr(image, "copy") else image
+        else:
+            cropped = image[y1:y2, x1:x2].copy()
+        frame_id = str(getattr(frame, "frame_id", "frame_unknown") or "frame_unknown")
+        timestamp = getattr(frame, "timestamp", None)
+        slot_frame = SimpleNamespace(
+            frame_id=f"{frame_id}__{slot_id}",
+            timestamp=timestamp,
+            image=cropped,
+            slot_id=slot_id,
+            slot_bbox=(x1, y1, x2, y2),
+            source_frame_id=frame_id,
+            source_timestamp=timestamp,
+            source_image=image,
+        )
+        return slot_frame
 
-    def _build_slot_states(self) -> Dict[str, SlotRuntimeState]:
-        return {
-            slot_id: SlotRuntimeState(slot_id=slot_id)
-            for slot_id in iter_slots_round_robin(DEFAULT_SLOT_ID)
-        }
+    def _build_slot_frames(self, frame) -> Dict[str, Any]:
+        slot_frames: Dict[str, Any] = {}
+        for slot_id in iter_slots_round_robin():
+            slot_frames[slot_id] = self._build_slot_frame(frame, slot_id)
+        return slot_frames
 
-    def _ensure_slot_directories(self) -> None:
-        for context in self.slot_contexts.values():
-            for key, path in context.paths.items():
-                if key == "slot_root":
-                    path.mkdir(parents=True, exist_ok=True)
-                    continue
-                path.mkdir(parents=True, exist_ok=True)
+    def _select_processing_slot_id(self) -> str:
+        return self.selected_slot_id
 
-    def _log_slot_bootstrap(self) -> None:
-        print("[MultiTable] Bootstrap slot contexts:")
-        for slot_id in iter_slots_round_robin(DEFAULT_SLOT_ID):
-            context = self.slot_contexts[slot_id]
-            print(
-                f"[MultiTable] {slot_id} bbox={context.bbox} "
-                f"root={context.paths['slot_root']}"
-            )
-
-    def get_slot_context(self, slot_id: str) -> SlotContext:
-        normalized = _normalize_slot_id(slot_id)
-        return self.slot_contexts[normalized]
-
-    def get_slot_state(self, slot_id: str) -> SlotRuntimeState:
-        normalized = _normalize_slot_id(slot_id)
-        return self.slot_states[normalized]
 
     def _build_auto_click_runtime(self, args):
         if not getattr(args, "autoclick", False):
@@ -2075,6 +2080,7 @@ class IntegratedRunner:
 
     def _build_status(self, result, recommendation_payload: Dict[str, Any], analysis_text: str, exception_text: str = "", auto_click_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return {
+            "slot_id": getattr(self, "selected_slot_id", DEFAULT_SLOT_ID),
             "frame_id": result.analysis.frame_id,
             "street": result.analysis.street,
             "errors": list(result.analysis.errors),
@@ -2198,8 +2204,21 @@ class IntegratedRunner:
         return live_decision, None
 
     def process_once(self):
-        frame = self.source.next_frame()
+        full_frame = self.source.next_frame()
+        slot_frames = self._build_slot_frames(full_frame)
+        processing_slot_id = self._select_processing_slot_id()
+        frame = slot_frames.get(processing_slot_id) or self._build_slot_frame(full_frame, processing_slot_id)
+        if hasattr(self.storage, "set_active_slot"):
+            self.storage.set_active_slot(processing_slot_id)
+        slot_state = self.slot_states.get(processing_slot_id)
+        if slot_state is not None:
+            slot_state.last_frame_ts = getattr(frame, "timestamp", None)
         result = self.pipeline.process_frame(frame)
+        if slot_state is not None:
+            slot_state.is_active = bool(getattr(result.analysis, "active_hero_found", False))
+            if slot_state.is_active:
+                slot_state.last_active_hero_seen_at = time.monotonic()
+            slot_state.current_hand_id = getattr(result.hand, "hand_id", None) if getattr(result, "hand", None) is not None else None
         decision = None
         recommendation_payload: Dict[str, Any]
         analysis_text = ""
@@ -2233,7 +2252,7 @@ class IntegratedRunner:
 
         if self.auto_click_runtime is not None:
             try:
-                frame_for_autoclick = self._normalize_frame_for_autoclick(frame.image)
+                frame_for_autoclick = self._normalize_frame_for_autoclick(getattr(full_frame, "image", None))
                 frame_width = 0
                 frame_height = 0
                 if frame_for_autoclick is not None and hasattr(frame_for_autoclick, "shape") and len(frame_for_autoclick.shape) >= 2:
@@ -2366,6 +2385,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to auto click YOLO model file or weights directory",
     )
     parser.add_argument("--autoclick-disable-idle", action="store_true", help="Disable idle mouse movement while auto click runtime is enabled")
+    parser.add_argument("--slot-view", type=int, default=1, help="UI/processing slot index for crop mode (1-6)")
     return parser
 
 
