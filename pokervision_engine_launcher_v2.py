@@ -49,7 +49,7 @@ from pokervision.config import get_default_settings
 from pokervision.detectors import MockDetectorBackend, YoloDetectorBackend
 from pokervision.hand_state import HandStateManager
 from pokervision.pipeline import PokerVisionPipeline
-from pokervision.storage import StorageManager, normalize_slot_id as normalize_storage_slot_id, resolve_slot_paths as build_storage_slot_paths
+from pokervision.storage import StorageManager
 from pokervision.ui_bridge import SharedState
 from pokervision.visualizer import DebugMonitorWindow
 from pokervision.card_renderer import render_card, render_card_back
@@ -100,46 +100,6 @@ DISPLAY_SLOTS = {
     6: [(0.50, 0.84), (0.16, 0.70), (0.18, 0.30), (0.50, 0.13), (0.82, 0.30), (0.84, 0.70)],
 }
 
-
-REGIONS: List[Tuple[int, int, int, int]] = [
-    (63, 93, 875, 681),     # table_01
-    (875, 93, 1686, 681),   # table_02
-    (1686, 93, 2498, 681),  # table_03
-    (63, 681, 875, 1269),   # table_04
-    (875, 681, 1686, 1269), # table_05
-    (1686, 681, 2498, 1269) # table_06
-]
-SLOT_IDS: Tuple[str, ...] = tuple(f"table_{index:02d}" for index in range(1, len(REGIONS) + 1))
-SLOT_BBOX_BY_ID: Dict[str, Tuple[int, int, int, int]] = {
-    slot_id: REGIONS[index]
-    for index, slot_id in enumerate(SLOT_IDS)
-}
-
-
-def get_slot_bbox(slot_id: str) -> Tuple[int, int, int, int]:
-    resolved_slot_id = normalize_storage_slot_id(slot_id)
-    bbox = SLOT_BBOX_BY_ID.get(resolved_slot_id)
-    if bbox is None:
-        raise KeyError(f"Unknown slot_id: {slot_id}")
-    return bbox
-
-
-def iter_slots_round_robin(start_slot_id: Optional[str] = None) -> Tuple[str, ...]:
-    order = list(SLOT_IDS)
-    if start_slot_id is None:
-        return tuple(order)
-    resolved_slot_id = normalize_storage_slot_id(start_slot_id)
-    if resolved_slot_id not in SLOT_BBOX_BY_ID:
-        raise KeyError(f"Unknown slot_id: {start_slot_id}")
-    start_index = order.index(resolved_slot_id)
-    return tuple(order[start_index:] + order[:start_index])
-
-
-def resolve_slot_paths(slot_id: str) -> Dict[str, Path]:
-    base_root = Path(get_default_settings().root_dir).expanduser().resolve()
-    slot_paths = build_storage_slot_paths(base_root, slot_id)
-    return slot_paths.as_dict()
-
 GENERIC_WIDE_RANGE = (
     "22+ A2s+ K2s+ Q2s+ J2s+ T2s+ 92s+ 82s+ 72s+ 62s+ 52s+ 42s+ 32s "
     "A2o+ K2o+ Q2o+ J2o+ T2o+ 92o+ 82o+ 72o+ 62o+ 52o+"
@@ -147,6 +107,70 @@ GENERIC_WIDE_RANGE = (
 
 STREET_ORDER = ["preflop", "flop", "turn", "river"]
 POSTFLOP_STREETS = ["flop", "turn", "river"]
+
+REGIONS = [
+    (63, 93, 875, 681),    # table_01
+    (875, 93, 1686, 681),  # table_02
+    (1686, 93, 2498, 681), # table_03
+    (63, 681, 875, 1269),  # table_04
+    (875, 681, 1686, 1269),# table_05
+    (1686, 681, 2498, 1269),# table_06
+]
+SLOT_IDS = tuple(f"table_{index:02d}" for index in range(1, len(REGIONS) + 1))
+DEFAULT_SLOT_ID = SLOT_IDS[0]
+SLOT_SUBDIR_NAMES = ("hands", "temp", "render", "logs")
+
+
+@dataclass(slots=True, frozen=True)
+class SlotContext:
+    slot_id: str
+    bbox: Tuple[int, int, int, int]
+    paths: Dict[str, Path]
+
+
+@dataclass(slots=True)
+class SlotRuntimeState:
+    slot_id: str
+    last_frame_ts: Optional[float] = None
+    last_active_hero_seen_at: Optional[float] = None
+    current_hand_id: Optional[str] = None
+    is_active: bool = False
+    last_render_state_path: Optional[str] = None
+    last_decision_summary: Optional[Dict[str, object]] = None
+
+
+def _normalize_slot_id(slot_id: Optional[str]) -> str:
+    candidate = str(slot_id or DEFAULT_SLOT_ID).strip()
+    if candidate not in SLOT_IDS:
+        raise KeyError(f"Unknown slot_id: {candidate}")
+    return candidate
+
+
+def get_slot_bbox(slot_id: str) -> Tuple[int, int, int, int]:
+    normalized = _normalize_slot_id(slot_id)
+    return REGIONS[SLOT_IDS.index(normalized)]
+
+
+def iter_slots_round_robin(start_slot_id: Optional[str] = None) -> Iterable[str]:
+    start = _normalize_slot_id(start_slot_id)
+    start_index = SLOT_IDS.index(start)
+    for offset in range(len(SLOT_IDS)):
+        yield SLOT_IDS[(start_index + offset) % len(SLOT_IDS)]
+
+
+def resolve_slot_paths(base_root: Path | str, slot_id: str) -> Dict[str, Path]:
+    normalized = _normalize_slot_id(slot_id)
+    root = Path(base_root).expanduser().resolve()
+    slot_root = root / "tables" / normalized
+    paths: Dict[str, Path] = {
+        "slot_root": slot_root,
+        "hands": slot_root / "hands",
+        "temp": slot_root / "temp",
+        "render": slot_root / "render",
+        "logs": slot_root / "logs",
+    }
+    return paths
+
 
 
 @dataclass(slots=True)
@@ -1835,35 +1859,63 @@ class IntegratedRunner:
         self.source = MockFrameSource(*self.settings.mock_table_size) if args.mock else ScreenFrameSource(self.settings.monitor_index)
         self.detector = MockDetectorBackend(self.settings) if args.mock else YoloDetectorBackend(self.settings)
         self.storage = StorageManager(self.settings)
-        self.slot_order: Tuple[str, ...] = iter_slots_round_robin()
-        self.slot_bboxes: Dict[str, Tuple[int, int, int, int]] = {slot_id: get_slot_bbox(slot_id) for slot_id in self.slot_order}
-        self.slot_paths_by_id: Dict[str, Dict[str, Path]] = self._bootstrap_static_slots()
         self.hand_manager = HandStateManager(
             self.settings.schema_version,
             self.settings.hand_stale_timeout_sec,
             self.settings.hand_close_timeout_sec,
         )
+        self.slot_contexts = self._build_slot_contexts()
+        self.slot_states = self._build_slot_states()
+        self._ensure_slot_directories()
+        self._log_slot_bootstrap()
+
         self.pipeline = PokerVisionPipeline(self.settings, self.detector, self.storage, self.hand_manager)
         self.auto_click_runtime = self._build_auto_click_runtime(args)
         self._auto_click_cycle_started_at: Optional[float] = None
         self._auto_click_cycle_key: Optional[str] = None
 
-    def resolve_slot_paths(self, slot_id: str) -> Dict[str, Path]:
-        slot_paths = self.storage.resolve_slot_paths(slot_id)
-        return slot_paths.as_dict()
 
-    def _bootstrap_static_slots(self) -> Dict[str, Dict[str, Path]]:
-        print("[MultiTableBootstrap] initializing static slot registry")
-        bootstrapped: Dict[str, Dict[str, Path]] = {}
-        for slot_id in self.slot_order:
-            slot_paths = self.storage.ensure_slot_structure(slot_id)
-            bootstrapped[slot_id] = slot_paths.as_dict()
-            print(
-                f"[MultiTableBootstrap] slot={slot_id} "
-                f"bbox={self.slot_bboxes[slot_id]} "
-                f"root={slot_paths.root_dir}"
+    def _build_slot_contexts(self) -> Dict[str, SlotContext]:
+        contexts: Dict[str, SlotContext] = {}
+        base_root = Path(self.settings.root_dir)
+        for slot_id in iter_slots_round_robin(DEFAULT_SLOT_ID):
+            contexts[slot_id] = SlotContext(
+                slot_id=slot_id,
+                bbox=get_slot_bbox(slot_id),
+                paths=resolve_slot_paths(base_root, slot_id),
             )
-        return bootstrapped
+        return contexts
+
+    def _build_slot_states(self) -> Dict[str, SlotRuntimeState]:
+        return {
+            slot_id: SlotRuntimeState(slot_id=slot_id)
+            for slot_id in iter_slots_round_robin(DEFAULT_SLOT_ID)
+        }
+
+    def _ensure_slot_directories(self) -> None:
+        for context in self.slot_contexts.values():
+            for key, path in context.paths.items():
+                if key == "slot_root":
+                    path.mkdir(parents=True, exist_ok=True)
+                    continue
+                path.mkdir(parents=True, exist_ok=True)
+
+    def _log_slot_bootstrap(self) -> None:
+        print("[MultiTable] Bootstrap slot contexts:")
+        for slot_id in iter_slots_round_robin(DEFAULT_SLOT_ID):
+            context = self.slot_contexts[slot_id]
+            print(
+                f"[MultiTable] {slot_id} bbox={context.bbox} "
+                f"root={context.paths['slot_root']}"
+            )
+
+    def get_slot_context(self, slot_id: str) -> SlotContext:
+        normalized = _normalize_slot_id(slot_id)
+        return self.slot_contexts[normalized]
+
+    def get_slot_state(self, slot_id: str) -> SlotRuntimeState:
+        normalized = _normalize_slot_id(slot_id)
+        return self.slot_states[normalized]
 
     def _build_auto_click_runtime(self, args):
         if not getattr(args, "autoclick", False):
