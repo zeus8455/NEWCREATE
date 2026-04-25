@@ -249,64 +249,6 @@ def _chip_match_status(
     return best_pos, best_score, best_meta, second_score, None
 
 
-def _pot_exclusion_override_is_confident(
-    *,
-    chosen_score: float | None,
-    chosen_meta: Dict[str, float] | None,
-    chosen_second_score: float | None,
-    settings,
-) -> bool:
-    """Allow near-pot Chips only when geometry strongly points to one seat.
-
-    Top-seat betting lanes can place valid Chips very close to the pot center.
-    A hard early pot-radius rejection loses those bets/raises, so the pot
-    filter stays strict only for true center noise and becomes soft for a
-    confident betting-lane match.
-    """
-    if chosen_score is None or chosen_meta is None:
-        return False
-
-    ambiguity_margin = float(getattr(settings, "chips_ambiguity_margin_px", 40.0))
-    max_distance = float(getattr(settings, "chips_to_position_max_distance_px", 140.0))
-
-    max_score = float(
-        getattr(
-            settings,
-            "chips_pot_exclusion_override_max_score_px",
-            min(max_distance, 55.0),
-        )
-    )
-    min_second_gap = float(
-        getattr(
-            settings,
-            "chips_pot_exclusion_override_min_second_gap_px",
-            max(ambiguity_margin * 1.5, 65.0),
-        )
-    )
-    max_line_distance = float(
-        getattr(
-            settings,
-            "chips_pot_exclusion_override_max_line_distance_px",
-            45.0,
-        )
-    )
-    projection_min = float(getattr(settings, "chips_pot_exclusion_override_projection_min", -0.05))
-    projection_max = float(getattr(settings, "chips_pot_exclusion_override_projection_max", 0.88))
-
-    line_distance = float(chosen_meta.get("line_distance_px", 9999.0))
-    projection = float(chosen_meta.get("projection_ratio", 9999.0))
-
-    if float(chosen_score) > max_score:
-        return False
-    if line_distance > max_line_distance:
-        return False
-    if projection < projection_min or projection > projection_max:
-        return False
-    if chosen_second_score is not None and (float(chosen_second_score) - float(chosen_score)) < min_second_gap:
-        return False
-    return True
-
-
 def _is_folded_position(
     player_states: Dict[str, Dict[str, object]] | None,
     position: str,
@@ -377,24 +319,10 @@ def _assign_chip_like_entry(
     street: str,
     settings,
 ) -> None:
-    pot_center_distance = None
     inside_pot_exclusion = False
-    hard_pot_exclusion = False
-    if table_center is not None:
-        pot_center_distance = _distance(region_center, table_center)
-        exclusion_radius = float(settings.table_pot_center_exclusion_radius_px)
-        inside_pot_exclusion = pot_center_distance <= exclusion_radius
-        if inside_pot_exclusion:
-            hard_radius = float(
-                getattr(
-                    settings,
-                    "table_pot_center_hard_exclusion_radius_px",
-                    max(35.0, exclusion_radius * 0.60),
-                )
-            )
-            hard_pot_exclusion = pot_center_distance <= hard_radius
-            entry.setdefault("warnings", []).append("Chips region inside pot exclusion radius")
-            entry["pot_center_distance_px"] = round(pot_center_distance, 3)
+    if table_center is not None and _distance(region_center, table_center) <= settings.table_pot_center_exclusion_radius_px:
+        inside_pot_exclusion = True
+        entry.setdefault("warnings", []).append("Chips region inside pot exclusion radius")
 
     live_candidate_names = [name for name in live_positions if name in position_centers]
     occupied_candidate_names = [name for name in _occupied_positions(positions) if name in position_centers]
@@ -490,26 +418,11 @@ def _assign_chip_like_entry(
         state.unassigned_chips.append(entry)
         return
 
+    if inside_pot_exclusion:
+        entry.setdefault("warnings", []).append("pot_exclusion_bypassed_by_confident_position_match")
+
     if chosen_second_score is not None and chosen_phase != "occupied_positions_fallback":
         entry["second_best_match_score_px"] = round(chosen_second_score, 3)
-
-    if inside_pot_exclusion:
-        if hard_pot_exclusion:
-            entry.setdefault("warnings", []).append("Chips rejected by hard pot center exclusion")
-            state.unassigned_chips.append(entry)
-            return
-
-        confident_pot_override = _pot_exclusion_override_is_confident(
-            chosen_score=chosen_score,
-            chosen_meta=chosen_meta,
-            chosen_second_score=chosen_second_score,
-            settings=settings,
-        )
-        if not confident_pot_override:
-            entry.setdefault("warnings", []).append("Chips inside pot exclusion radius without confident lane match")
-            state.unassigned_chips.append(entry)
-            return
-        entry.setdefault("warnings", []).append("Chips inside pot exclusion radius accepted by confident lane match")
 
     _store_position_bet(state, chosen_pos, entry, settings)
 
@@ -601,6 +514,44 @@ def build_table_amount_state(
             logical_dist = None
             if logical_pos is not None and logical_pos in position_centers:
                 logical_dist = _distance(region_center, position_centers[logical_pos])
+
+            amount_bb = entry.get("amount_bb")
+            try:
+                amount_value = float(amount_bb) if amount_bb is not None else None
+            except (TypeError, ValueError):
+                amount_value = None
+
+            # SB complete / limp can be misdetected by the amount model as a second BB marker.
+            # In the SB-vs-BB limped spot the marker is geometrically closest to SB, while
+            # the logical BB blind is far away. Re-anchoring that marker to BB makes the
+            # preflop ledger look like BB vs BB and hides the SB limp. Treat it as SB chips.
+            if (
+                street == "preflop"
+                and region.label == "BB"
+                and nearest_pos == "SB"
+                and logical_pos == "BB"
+                and "SB" in positions
+                and "BB" in positions
+                and amount_value is not None
+                and 0.75 <= amount_value <= 1.25
+                and logical_dist is not None
+                and logical_dist > settings.blind_marker_to_position_max_distance_px
+            ):
+                entry.setdefault("warnings", []).append("BB marker near SB reinterpreted as SB complete")
+                entry["reinterpreted_from_blind_marker"] = region.label
+                entry["matched_position"] = "SB"
+                entry["street"] = street
+                entry["matched_among_live_positions_only"] = True
+                entry["match_phase"] = "sb_complete_from_ambiguous_bb_marker"
+                entry["candidate_positions"] = [name for name in ("SB", "BB") if name in positions]
+                if nearest_dist is not None:
+                    entry["nearest_position"] = nearest_pos
+                    entry["nearest_distance_px"] = round(nearest_dist, 3)
+                entry["logical_position"] = logical_pos
+                entry["logical_distance_px"] = round(logical_dist, 3)
+                warnings.append("BB marker near SB treated as SB complete")
+                _store_position_bet(state, "SB", entry, settings)
+                continue
 
             if street == "preflop" and logical_pos is not None:
                 matched_pos = logical_pos

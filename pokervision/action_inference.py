@@ -45,7 +45,10 @@ def _engine_action_for(semantic_action: str) -> str:
         return "call"
     if semantic_action == "check":
         return "check"
+    if semantic_action == "fold":
+        return "fold"
     return "raise"
+
 
 LEGACY_ACTION_BY_SEMANTIC = {
     "limp": "LIMP",
@@ -130,7 +133,6 @@ def _forced_preflop_blinds(player_count: int, occupied_positions: Iterable[str])
         if "BB" in positions:
             forced["BB"] = 1.0
         return forced
-
     forced = {}
     if "SB" in positions:
         forced["SB"] = 0.5
@@ -149,22 +151,15 @@ def get_street_actor_order(
     ring = [pos for pos in CANONICAL_RING.get(player_count, []) if pos in occupied_positions]
     if not ring:
         return []
-
     if street == "preflop":
         ordered = [pos for pos in PREFLOP_ORDER.get(player_count, ring) if pos in ring]
-        # CRITICAL INVARIANT:
         # Preflop reconstruction is historical, not purely live-state based.
-        # A position that is folded in the current frame but still has money
-        # committed on the table must remain eligible for actor order and
-        # action reconstruction. Otherwise lines like
-        # open -> flat -> squeeze/3bet -> opener folds collapse into a false
-        # shorter history because the earlier contributor disappears too early.
+        # A folded seat with visible contribution must remain in actor order.
         return [
             pos
             for pos in ordered
             if (not _player_is_folded(player_states, pos)) or _safe_float((contributions or {}).get(pos), 0.0) > EPS
         ]
-
     after_btn_preference = ["SB", "BB", "UTG", "MP", "CO", "BTN"]
     start_pos = next((pos for pos in after_btn_preference if pos in ring), ring[0])
     start_idx = ring.index(start_pos)
@@ -194,9 +189,12 @@ def _derive_node_type_preview(
         semantic = str(step.get("semantic_action") or "")
         if semantic in aggressive_actions:
             last_aggressive = str(step.get("position") or step.get("pos") or "") or last_aggressive
-        max_raise_level = max(max_raise_level, int(step.get("raise_level_after_action") or 0))
+            max_raise_level = max(max_raise_level, int(step.get("raise_level_after_action") or 0))
 
-    if player_count == 2 and limpers and limpers[0] == "BTN" and hero_pos == "BB" and not opener_pos:
+    # Covers both HU naming (BTN is SB) and 3max+ naming (real SB).
+    # If everyone folded to SB, SB completed to 1bb, and HERO is BB, use the
+    # dedicated advisor branch instead of a generic/open-limp or false BB-vs-BB spot.
+    if hero_pos == "BB" and limpers and len(limpers) == 1 and limpers[0] in {"BTN", "SB"} and not opener_pos:
         return "bb_vs_sb_limp"
 
     if max_raise_level >= 4 and four_bettor_pos:
@@ -204,19 +202,16 @@ def _derive_node_type_preview(
             return "fourbettor_vs_5bet"
         if hero_pos == three_bettor_pos and last_aggressive and last_aggressive != hero_pos:
             return "threebettor_vs_4bet"
-
     if four_bettor_pos:
         if hero_pos == three_bettor_pos:
             return "threebettor_vs_4bet"
         if hero_pos == four_bettor_pos and hero_pos not in {opener_pos, three_bettor_pos}:
             return "cold_4bet"
-
     if three_bettor_pos:
         if hero_pos == opener_pos:
             return "opener_vs_3bet"
         if opener_pos and hero_pos not in {opener_pos, three_bettor_pos}:
             return "facing_3bet"
-
     if opener_pos:
         if limpers and hero_pos in limpers:
             return "limper_vs_iso"
@@ -231,7 +226,6 @@ def _derive_node_type_preview(
         if len(limp_actions) == 1:
             return "open_limp_first_in"
         return "over_limp_after_1_limper" if len(limp_actions) == 2 else "over_limp_after_2plus_limpers"
-
     return "unopened"
 
 
@@ -265,8 +259,6 @@ def _build_action_step(
     if extra:
         payload.update(extra)
     return _decorate_legacy_action_fields(payload)
-
-
 
 
 def _normalize_count_or_len(value: Any) -> int:
@@ -343,6 +335,7 @@ def _build_preflop_resolved_ledger(
         "contract_version": "preflop_resolved_v1",
     }
 
+
 def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> Dict[str, Any]:
     observation = build_preflop_frame_observation(
         analysis,
@@ -376,6 +369,7 @@ def _infer_preflop_actions(previous_hand: Any, analysis: Any, settings: Any) -> 
         build_action_step=_build_action_step,
     )
 
+
 def _normalized_hero_cards_for_identity(cards: Any) -> tuple[str, ...]:
     if not cards:
         return tuple()
@@ -383,16 +377,7 @@ def _normalized_hero_cards_for_identity(cards: Any) -> tuple[str, ...]:
 
 
 def _same_hand_identity(previous_hand: Any, analysis: Any) -> bool:
-    """Return True only when previous_hand belongs to the same logical hand.
-
-    CRITICAL INVARIANT:
-    Postflop action-state must never leak across different hand_id instances.
-    infer_actions() runs before HandStateManager decides whether the new frame
-    updates the current hand or opens a new one, so the only safe identity key
-    available here is HERO cards. If we reuse previous postflop commitments when
-    HERO cards changed, a new hand can inherit stale bets/highest commitment and
-    misclassify first-bet spots as raises.
-    """
+    """Return True only when previous_hand belongs to the same logical hand."""
     if previous_hand is None:
         return False
     prev_cards = _normalized_hero_cards_for_identity(getattr(previous_hand, "hero_cards", []) or [])
@@ -405,6 +390,7 @@ def _infer_postflop_actions(previous_hand: Any, analysis: Any, settings: Any) ->
     same_hand = _same_hand_identity(previous_hand, analysis)
     previous_action_state = dict(getattr(previous_hand, "action_state", {}) or {}) if same_hand else {}
     can_carry_street_state = same_hand and previous_action_state.get("street") == street
+
     if not can_carry_street_state:
         street_commitments: Dict[str, float] = {}
         current_highest = 0.0
