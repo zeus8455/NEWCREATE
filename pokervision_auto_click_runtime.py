@@ -296,6 +296,9 @@ class AutoClickSlotState:
     last_normalized_action: Optional[str] = None
     last_raw_action: Optional[str] = None
     last_click_at: Optional[float] = None
+    post_click_verify_guard: Optional[str] = None
+    post_click_verify_attempts: int = 0
+    post_click_verify_last_at: Optional[float] = None
 
 
 @dataclass(slots=True)
@@ -332,9 +335,13 @@ class AutoClickConfig:
     target_jitter_px_min: int = 2
     target_jitter_px_max: int = 7
     click_target_inner_padding_px_min: int = 5
-    click_target_inner_padding_px_max: int = 12
+    click_target_inner_padding_px_max: int = 10000
     click_target_inner_padding_ratio_min: float = 0.05
     click_target_inner_padding_ratio_max: float = 0.10
+    post_click_verify_enabled: bool = True
+    post_click_verify_max_retries: int = 2
+    post_click_verify_min_delay_sec: float = 0.20
+    post_click_verify_actions: Tuple[str, ...] = ("fold", "check", "call", "check_fold")
     mouse_curve_offset_px_min: int = 18
     mouse_curve_offset_px_max: int = 125
     mouse_overshoot_probability: float = 0.42
@@ -511,6 +518,9 @@ class AutoClickRuntime:
         self.last_normalized_action: Optional[str] = None
         self.last_raw_action: Optional[str] = None
         self.last_click_at: Optional[float] = None
+        self.post_click_verify_guard: Optional[str] = None
+        self.post_click_verify_attempts: int = 0
+        self.post_click_verify_last_at: Optional[float] = None
         self.next_idle_at = self._schedule_next_idle(time.monotonic())
         self.recent_events: List[AutoClickEvent] = []
         self.debug_root = Path(self.config.debug_root_dir).expanduser().resolve()
@@ -553,6 +563,9 @@ class AutoClickRuntime:
         target.last_normalized_action = self.last_normalized_action
         target.last_raw_action = self.last_raw_action
         target.last_click_at = self.last_click_at
+        target.post_click_verify_guard = self.post_click_verify_guard
+        target.post_click_verify_attempts = self.post_click_verify_attempts
+        target.post_click_verify_last_at = self.post_click_verify_last_at
 
     def _load_slot_state_to_current(self, source: AutoClickSlotState) -> None:
         self.state = source.state
@@ -575,6 +588,9 @@ class AutoClickRuntime:
         self.last_normalized_action = source.last_normalized_action
         self.last_raw_action = source.last_raw_action
         self.last_click_at = source.last_click_at
+        self.post_click_verify_guard = source.post_click_verify_guard
+        self.post_click_verify_attempts = source.post_click_verify_attempts
+        self.post_click_verify_last_at = source.post_click_verify_last_at
 
     def _sync_active_slot_state(self) -> None:
         target = self.slot_states.setdefault(self._active_slot_key, AutoClickSlotState())
@@ -954,6 +970,24 @@ class AutoClickRuntime:
                 )
             )
 
+        verify_retry_allowed, verify_retry_info = self._should_post_click_verify_retry(
+            snapshot=snapshot,
+            plan=plan,
+            decision_memory=decision_memory,
+            now=now,
+        )
+        if verify_retry_allowed:
+            events.append(self._event("post_click_verify_retry_triggered", **verify_retry_info))
+            executed = self._execute_plan(plan, filtered, snapshot, events)
+            self._write_debug_plan(snapshot, plan, filtered, executed, events=events)
+            if executed:
+                self._record_post_click_verify_retry(decision_memory, events)
+            return self._finalize(self._result_from_state(plan, executed, events, locked=executed))
+        if verify_retry_info.get("retry_limit_reached"):
+            events.append(self._event("post_click_verify_retry_limit_reached", **verify_retry_info))
+        elif verify_retry_info.get("retry_wait_remaining_sec") is not None:
+            events.append(self._event("post_click_verify_retry_wait", **verify_retry_info))
+
         if decision_guard and self.locked_decision_guard == decision_guard:
             self.state = STATE_LOCKED_UNTIL_RESET
             events.append(
@@ -1050,6 +1084,9 @@ class AutoClickRuntime:
         self.last_normalized_action = None
         self.last_raw_action = None
         self.last_click_at = None
+        self.post_click_verify_guard = None
+        self.post_click_verify_attempts = 0
+        self.post_click_verify_last_at = None
         self.slot_states.clear()
         self._active_slot_key = "single"
         self._sync_active_slot_state()
@@ -1090,6 +1127,7 @@ class AutoClickRuntime:
         self.last_plan_name = None
         self.last_raw_action = None
         self.last_normalized_action = None
+        self.last_click_at = None
         self.last_executed_decision_id = None
         self.last_executed_solver_fingerprint = None
         self.last_executed_source_frame_id = None
@@ -1100,6 +1138,9 @@ class AutoClickRuntime:
         self.last_executed_decision_guard = None
         self.locked_decision_id = None
         self.locked_decision_guard = None
+        self.post_click_verify_guard = None
+        self.post_click_verify_attempts = 0
+        self.post_click_verify_last_at = None
         self.state = STATE_ACTIVE_HERO_WAITING_DECISION if snapshot.active_hero_present else STATE_IDLE
         return [self._event("cycle_reset", hand_id=stable_hand_id or "", state=self.state, cycle_key=cycle_key)]
 
@@ -1615,6 +1656,94 @@ class AutoClickRuntime:
             "guard_source": guard_source,
         }
 
+    def _should_post_click_verify_retry(
+        self,
+        *,
+        snapshot: AutoClickSnapshot,
+        plan: AutoClickPlan,
+        decision_memory: Dict[str, object],
+        now: float,
+    ) -> Tuple[bool, Dict[str, object]]:
+        guard = _first_non_empty(decision_memory.get("guard_key"))
+        normalized_action = str(plan.normalized_action or "").strip().lower()
+        allowed_actions = {str(item).strip().lower() for item in self.config.post_click_verify_actions}
+        info: Dict[str, object] = {
+            "decision_id": decision_memory.get("decision_id") or "",
+            "guard_key": guard or "",
+            "plan_name": plan.plan_name,
+            "normalized_action": normalized_action,
+            "hand_id": snapshot.hand_id or "",
+            "street": snapshot.street,
+            "attempts_done": int(self.post_click_verify_attempts or 0),
+            "max_retries": int(self.config.post_click_verify_max_retries),
+            "active_hero_present": bool(snapshot.active_hero_present),
+        }
+        if not bool(self.config.post_click_verify_enabled):
+            info["blocked_reason"] = "post_click_verify_disabled"
+            return False, info
+        if not guard:
+            info["blocked_reason"] = "missing_guard"
+            return False, info
+        if self.locked_decision_guard != guard and self.last_executed_decision_guard != guard:
+            info["blocked_reason"] = "different_decision_guard"
+            return False, info
+        if self.post_click_verify_guard != guard:
+            info["blocked_reason"] = "verify_guard_not_armed"
+            return False, info
+        if normalized_action not in allowed_actions:
+            info["blocked_reason"] = "action_not_verify_retryable"
+            return False, info
+        if not snapshot.active_hero_present:
+            info["blocked_reason"] = "active_hero_absent"
+            return False, info
+        attempts = int(self.post_click_verify_attempts or 0)
+        if attempts >= int(self.config.post_click_verify_max_retries):
+            info["blocked_reason"] = "retry_limit_reached"
+            info["retry_limit_reached"] = True
+            return False, info
+        last_click_at = self.last_click_at
+        if last_click_at is not None:
+            elapsed = float(now) - float(last_click_at)
+            min_delay = float(self.config.post_click_verify_min_delay_sec)
+            if elapsed < min_delay:
+                info["blocked_reason"] = "retry_delay_not_elapsed"
+                info["retry_wait_remaining_sec"] = round(max(0.0, min_delay - elapsed), 3)
+                return False, info
+        info["retry_attempt"] = attempts + 1
+        info["blocked_reason"] = ""
+        return True, info
+
+    def _record_post_click_verify_retry(self, decision_memory: Dict[str, object], events: List[AutoClickEvent]) -> None:
+        self.locked_decision_id = _first_non_empty(decision_memory.get("decision_id"))
+        self.locked_decision_guard = _first_non_empty(decision_memory.get("guard_key"))
+        self.last_executed_decision_id = _first_non_empty(decision_memory.get("decision_id"))
+        self.last_executed_solver_fingerprint = _first_non_empty(decision_memory.get("solver_fingerprint"))
+        self.last_executed_source_frame_id = _first_non_empty(decision_memory.get("source_frame_id"))
+        self.last_executed_hand_id = _first_non_empty(decision_memory.get("hand_id"))
+        self.last_executed_street = _first_non_empty(decision_memory.get("street"))
+        self.last_executed_plan_name = _first_non_empty(decision_memory.get("plan_name"))
+        self.last_executed_at = time.time()
+        self.last_executed_decision_guard = _first_non_empty(decision_memory.get("guard_key"))
+        self.post_click_verify_guard = self.last_executed_decision_guard
+        self.post_click_verify_attempts = int(self.post_click_verify_attempts or 0) + 1
+        self.post_click_verify_last_at = time.monotonic()
+        events.append(
+            self._event(
+                "post_click_verify_retry_recorded",
+                decision_id=self.last_executed_decision_id or "",
+                solver_fingerprint=self.last_executed_solver_fingerprint or "",
+                source_frame_id=self.last_executed_source_frame_id or "",
+                hand_id=self.last_executed_hand_id or "",
+                street=self.last_executed_street or "",
+                plan_name=self.last_executed_plan_name or "",
+                retry_attempts=self.post_click_verify_attempts,
+                max_retries=int(self.config.post_click_verify_max_retries),
+                guard_source=decision_memory.get("guard_source") or "",
+                execution_token=decision_memory.get("execution_token") or "",
+                recorded_at=self.last_executed_at,
+            )
+        )
+
     def _record_successful_execution(self, decision_memory: Dict[str, object], events: List[AutoClickEvent]) -> None:
         self.locked_decision_id = _first_non_empty(decision_memory.get("decision_id"))
         self.locked_decision_guard = _first_non_empty(decision_memory.get("guard_key"))
@@ -1626,6 +1755,9 @@ class AutoClickRuntime:
         self.last_executed_plan_name = _first_non_empty(decision_memory.get("plan_name"))
         self.last_executed_at = time.time()
         self.last_executed_decision_guard = _first_non_empty(decision_memory.get("guard_key"))
+        self.post_click_verify_guard = self.last_executed_decision_guard
+        self.post_click_verify_attempts = 0
+        self.post_click_verify_last_at = time.monotonic()
         events.append(
             self._event(
                 "decision_id_recorded_after_success",
@@ -1821,36 +1953,44 @@ class AutoClickRuntime:
 
     def _pick_click_target(self, detection: ButtonDetection) -> Tuple[int, int]:
         x1, y1, x2, y2 = detection.bbox
-        left = int(math.floor(min(x1, x2)))
-        top = int(math.floor(min(y1, y2)))
-        right = int(math.ceil(max(x1, x2)))
-        bottom = int(math.ceil(max(y1, y2)))
-        width = max(1, right - left)
-        height = max(1, bottom - top)
+        left_f = float(min(x1, x2))
+        top_f = float(min(y1, y2))
+        right_f = float(max(x1, x2))
+        bottom_f = float(max(y1, y2))
+        width = max(1.0, right_f - left_f)
+        height = max(1.0, bottom_f - top_f)
 
         ratio_min = max(0.0, float(self.config.click_target_inner_padding_ratio_min))
         ratio_max = max(ratio_min, float(self.config.click_target_inner_padding_ratio_max))
         padding_ratio_x = self.rng.uniform(ratio_min, ratio_max)
         padding_ratio_y = self.rng.uniform(ratio_min, ratio_max)
-        padding_x = int(round(width * padding_ratio_x))
-        padding_y = int(round(height * padding_ratio_y))
+        padding_x = width * padding_ratio_x
+        padding_y = height * padding_ratio_y
 
-        padding_x = max(int(self.config.click_target_inner_padding_px_min), padding_x)
-        padding_y = max(int(self.config.click_target_inner_padding_px_min), padding_y)
-        padding_x = min(int(self.config.click_target_inner_padding_px_max), padding_x, max(1, width // 4))
-        padding_y = min(int(self.config.click_target_inner_padding_px_max), padding_y, max(1, height // 4))
+        padding_x = max(float(self.config.click_target_inner_padding_px_min), padding_x)
+        padding_y = max(float(self.config.click_target_inner_padding_px_min), padding_y)
+        px_max = float(self.config.click_target_inner_padding_px_max)
+        if px_max > 0:
+            padding_x = min(px_max, padding_x)
+            padding_y = min(px_max, padding_y)
+        # Keep the click inside the configured 5-10% inner zone, based on the
+        # real bbox floats, not on floor/ceil-expanded coordinates.
+        padding_x = min(padding_x, max(1.0, width / 3.0))
+        padding_y = min(padding_y, max(1.0, height / 3.0))
 
-        safe_left = left + padding_x
-        safe_top = top + padding_y
-        safe_right = right - padding_x
-        safe_bottom = bottom - padding_y
-        if safe_left >= safe_right:
-            safe_left, safe_right = left, right
-        if safe_top >= safe_bottom:
-            safe_top, safe_bottom = top, bottom
+        safe_left = int(math.ceil(left_f + padding_x))
+        safe_top = int(math.ceil(top_f + padding_y))
+        safe_right = int(math.floor(right_f - padding_x))
+        safe_bottom = int(math.floor(bottom_f - padding_y))
+        if safe_left > safe_right:
+            center_x = int(round((left_f + right_f) / 2.0))
+            safe_left = safe_right = center_x
+        if safe_top > safe_bottom:
+            center_y = int(round((top_f + bottom_f) / 2.0))
+            safe_top = safe_bottom = center_y
 
-        target_x = self.rng.randint(int(safe_left), int(max(safe_left, safe_right)))
-        target_y = self.rng.randint(int(safe_top), int(max(safe_top, safe_bottom)))
+        target_x = self.rng.randint(int(safe_left), int(safe_right))
+        target_y = self.rng.randint(int(safe_top), int(safe_bottom))
         jitter_x = self.rng.randint(int(self.config.target_jitter_px_min), int(self.config.target_jitter_px_max))
         jitter_y = self.rng.randint(int(self.config.target_jitter_px_min), int(self.config.target_jitter_px_max))
         target_x = self._clamp_to_bounds(target_x + self.rng.randint(-jitter_x, jitter_x), int(safe_left), int(max(safe_left, safe_right)))
