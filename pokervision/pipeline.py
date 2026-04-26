@@ -108,6 +108,73 @@ def _safe_jsonable(value: Any, *, depth: int = 0) -> Any:
     return repr(value)
 
 
+STREET_ORDER = {
+    "preflop": 0,
+    "flop": 1,
+    "turn": 2,
+    "river": 3,
+}
+
+
+def _street_rank(street: Any) -> int:
+    return STREET_ORDER.get(str(street or "preflop").strip().lower(), 0)
+
+
+def _detected_street_markers(detections: list[Detection]) -> list[str]:
+    """Return unique street markers detected by the structure model.
+
+    The structure model can occasionally leave the previous street marker visible
+    together with the new one, for example Turn + River. Treat that as an
+    ambiguous marker pair that can be repaired by choosing the latest
+    non-backward street.
+    """
+    out: list[str] = []
+    for det in detections or []:
+        label = str(getattr(det, "label", "") or "").strip().lower()
+        if label in {"flop", "turn", "river"} and label not in out:
+            out.append(label)
+    return out
+
+
+def _previous_street_from_hand(hand: Optional[HandState]) -> str:
+    if hand is None:
+        return "preflop"
+    snapshot = getattr(hand, "render_state_snapshot", None)
+    if isinstance(snapshot, dict) and snapshot.get("street"):
+        return str(snapshot.get("street") or "preflop").strip().lower()
+    street_state = getattr(hand, "street_state", None)
+    if isinstance(street_state, dict) and street_state.get("current_street"):
+        return str(street_state.get("current_street") or "preflop").strip().lower()
+    return "preflop"
+
+
+def _repair_street_marker_conflict(
+    detections: list[Detection],
+    previous_hand: Optional[HandState],
+    street_errors: list[str],
+) -> Optional[dict[str, Any]]:
+    markers = _detected_street_markers(detections)
+    if len(markers) < 2:
+        return None
+
+    previous_street = _previous_street_from_hand(previous_hand)
+    chosen = max(markers, key=_street_rank)
+
+    # Never repair to an earlier street than the last valid render/hand street.
+    # This prevents a stale Flop/Turn marker from rewinding a live hand.
+    if _street_rank(chosen) < _street_rank(previous_street):
+        return None
+
+    return {
+        "applied": True,
+        "detected_markers": markers,
+        "chosen_street": chosen,
+        "previous_street": previous_street,
+        "reason": "latest_non_backward_street_marker_selected",
+        "original_errors": list(street_errors or []),
+    }
+
+
 
 
 def _build_solver_context_preview_fallback(analysis: FrameAnalysis, hand: HandState) -> dict[str, Any]:
@@ -776,7 +843,14 @@ class PokerVisionPipeline:
         analysis.btn_detection = btn
 
         street_val = determine_street(cleaned)
+        street_repair: Optional[dict[str, Any]] = None
         if not street_val.ok:
+            street_repair = _repair_street_marker_conflict(
+                cleaned,
+                self.hand_manager.active_hand,
+                list(street_val.errors),
+            )
+        if not street_val.ok and not street_repair:
             analysis.errors.extend(street_val.errors)
             artifacts = self.storage.save_failure_artifacts(
                 "street",
@@ -802,7 +876,16 @@ class PokerVisionPipeline:
             )
             return PipelineResult(analysis=analysis, hand=self.hand_manager.active_hand, render_state=error_render_state)
 
-        street = str(street_val.meta["street"])
+        if street_repair:
+            street = str(street_repair["chosen_street"])
+            analysis.warnings.append(
+                "Street marker conflict repaired: "
+                + ", ".join(str(item) for item in street_repair.get("detected_markers", []))
+                + f" -> {street}"
+            )
+            analysis.validation["street_marker_conflict_repair"] = _safe_jsonable(street_repair)
+        else:
+            street = str(street_val.meta["street"])
         analysis.street = street
         table_center, positions = assign_positions(seats, btn, player_count)
         hero_position = determine_hero_position(positions, active, self.settings.seat_match_max_distance_px)

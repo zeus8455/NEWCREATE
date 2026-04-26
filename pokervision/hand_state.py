@@ -113,6 +113,292 @@ class HandStateManager:
             deduped.append(dict(action))
         return deduped
 
+    def _safe_float(self, value: object, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _format_amount_for_display(self, amount: object) -> str:
+        value = self._safe_float(amount, 0.0)
+        if abs(value - round(value)) <= 1e-9:
+            return f"{value:.1f}"
+        text = f"{value:.4f}".rstrip("0").rstrip(".")
+        if "." not in text:
+            text += ".0"
+        return text
+
+    def _max_raise_level_from_actions(self, actions: Iterable[dict]) -> int:
+        max_level = 0
+        for action in actions or []:
+            try:
+                max_level = max(max_level, int((action or {}).get("raise_level_after_action") or 0))
+            except (TypeError, ValueError):
+                continue
+        return max_level
+
+    def _call_vs_for_raise_level(self, raise_level: int) -> str:
+        if raise_level <= 1:
+            return "open_raise"
+        if raise_level == 2:
+            return "3bet"
+        if raise_level == 3:
+            return "4bet"
+        return "5bet_or_more"
+
+    def _infer_missing_postflop_preflop_closing_calls(
+        self,
+        reconstructed_preflop: dict,
+        incoming_state: dict,
+        analysis: Optional[FrameAnalysis],
+    ) -> None:
+        """Close the immutable preflop ledger when postflop proves who continued.
+
+        Vision can miss the final preflop call frame.  If a hand later reaches
+        flop/turn/river, every non-folded/non-all-in player that is still active
+        must have paid the final preflop price.  This repair adds an inferred
+        preflop CALL to the canonical reconstructed_preflop payload only; it
+        never reads postflop bet amounts and therefore cannot contaminate the
+        preflop ledger with flop/turn/river chips.
+        """
+        if not isinstance(reconstructed_preflop, dict) or not reconstructed_preflop:
+            return
+        if analysis is None:
+            return
+        street = str(getattr(analysis, "street", "") or incoming_state.get("street") or "").lower()
+        if street not in {"flop", "turn", "river"}:
+            return
+
+        action_history = [dict(item) for item in list(
+            reconstructed_preflop.get("action_history_resolved")
+            or reconstructed_preflop.get("action_history")
+            or []
+        ) if isinstance(item, dict)]
+        if not action_history:
+            return
+
+        aggressive_actions = {"open_raise", "iso_raise", "3bet", "4bet", "cold_4bet", "5bet_jam"}
+        if not any(str(action.get("semantic_action") or "") in aggressive_actions for action in action_history):
+            return
+
+        current_price = self._safe_float(reconstructed_preflop.get("current_price_to_call"), 0.0)
+        if current_price <= 0.0:
+            for action in action_history:
+                semantic = str(action.get("semantic_action") or "")
+                if semantic in aggressive_actions or semantic == "call":
+                    current_price = max(
+                        current_price,
+                        self._safe_float(action.get("final_contribution_bb"), 0.0),
+                        self._safe_float(action.get("amount_bb"), 0.0),
+                    )
+        if current_price <= 0.0:
+            return
+
+        commitments = {
+            str(pos): self._safe_float(amount, 0.0)
+            for pos, amount in dict(
+                reconstructed_preflop.get("resolved_commitments_by_pos")
+                or reconstructed_preflop.get("final_contribution_bb_by_pos")
+                or {}
+            ).items()
+        }
+        street_commitments = {
+            str(pos): self._safe_float(amount, 0.0)
+            for pos, amount in dict(
+                reconstructed_preflop.get("final_contribution_street_bb_by_pos")
+                or commitments
+                or {}
+            ).items()
+        }
+        if not commitments:
+            return
+
+        player_states = dict(getattr(analysis, "player_states", {}) or {})
+        occupied_positions = [str(pos) for pos in list(getattr(analysis, "occupied_positions", []) or [])]
+        actor_order = [str(pos) for pos in list(reconstructed_preflop.get("actor_order") or occupied_positions)]
+        if not actor_order:
+            actor_order = occupied_positions
+
+        existing_call_keys = {
+            (
+                str(action.get("position") or action.get("pos") or ""),
+                round(self._safe_float(action.get("final_contribution_bb") or action.get("amount_bb"), 0.0), 4),
+                str(action.get("semantic_action") or ""),
+            )
+            for action in action_history
+        }
+
+        raise_level = self._max_raise_level_from_actions(action_history)
+        call_vs = self._call_vs_for_raise_level(raise_level)
+        frame_id = getattr(analysis, "frame_id", None)
+        timestamp = getattr(analysis, "timestamp", None)
+        added_calls: list[dict] = []
+
+        for position in actor_order:
+            state = dict(player_states.get(position, {}) or {})
+            if bool(state.get("is_fold", False)):
+                continue
+            if bool(state.get("is_all_in", False)):
+                continue
+            if not bool(state.get("is_active", True)):
+                continue
+            committed = self._safe_float(commitments.get(position), 0.0)
+            if committed >= current_price - 1e-9:
+                continue
+            key = (position, round(current_price, 4), "call")
+            if key in existing_call_keys:
+                commitments[position] = round(current_price, 4)
+                street_commitments[position] = round(current_price, 4)
+                continue
+
+            event = {
+                "order": len(action_history) + len(added_calls) + 1,
+                "position": position,
+                "pos": position,
+                "street": "preflop",
+                "final_contribution_bb": round(current_price, 4),
+                "amount_bb": round(current_price, 4),
+                "semantic_action": "call",
+                "engine_action": "call",
+                "raise_level_after_action": raise_level,
+                "current_price_to_call_after_action": round(current_price, 4),
+                "call_vs": call_vs,
+                "inferred_postflop_closing_call": True,
+                "reason": "player_reached_postflop_with_preflop_commitment_below_final_price",
+                "frame_id": frame_id,
+                "timestamp": timestamp,
+                "action": "CALL",
+                "action_display": f"CALL {self._format_amount_for_display(current_price)}",
+            }
+            added_calls.append(event)
+            existing_call_keys.add(key)
+            commitments[position] = round(current_price, 4)
+            street_commitments[position] = round(current_price, 4)
+
+        if not added_calls:
+            return
+
+        merged_history = self._dedupe_actions([*action_history, *added_calls])
+        for index, action in enumerate(merged_history, start=1):
+            action["order"] = index
+
+        reconstructed_preflop["action_history"] = [dict(item) for item in merged_history]
+        reconstructed_preflop["action_history_resolved"] = [dict(item) for item in merged_history]
+        reconstructed_preflop["final_contribution_bb_by_pos"] = dict(commitments)
+        reconstructed_preflop["final_contribution_street_bb_by_pos"] = dict(street_commitments)
+        reconstructed_preflop["resolved_commitments_by_pos"] = dict(commitments)
+        reconstructed_preflop["current_price_to_call"] = round(current_price, 4)
+        reconstructed_preflop["callers_after_open"] = sum(
+            1 for action in merged_history
+            if str(action.get("semantic_action") or "") == "call"
+            and str(action.get("call_vs") or "") == "open_raise"
+        )
+        reconstructed_preflop["callers"] = reconstructed_preflop["callers_after_open"]
+        reconstructed_preflop["postflop_closing_call_repair_applied"] = True
+        notes = list(reconstructed_preflop.get("reconciliation_notes") or [])
+        note = "postflop_active_players_closed_missing_preflop_calls"
+        if note not in notes:
+            notes.append(note)
+        reconstructed_preflop["reconciliation_notes"] = notes
+        skipped = [str(pos) for pos in list(reconstructed_preflop.get("skipped_positions") or [])]
+        reconstructed_preflop["skipped_positions"] = [pos for pos in skipped if pos not in {str(action.get("position")) for action in added_calls}]
+
+        hero_preview = reconstructed_preflop.get("hero_context_preview")
+        if isinstance(hero_preview, dict):
+            hero_preview["callers"] = reconstructed_preflop["callers"]
+            hero_preview["postflop_closing_call_repair_applied"] = True
+
+        projection = reconstructed_preflop.get("preflop_projection")
+        if isinstance(projection, dict):
+            projection["action_history"] = [dict(item) for item in merged_history]
+            projection["action_history_resolved"] = [dict(item) for item in merged_history]
+            projection["final_contribution_bb_by_pos"] = dict(commitments)
+            projection["final_contribution_street_bb_by_pos"] = dict(street_commitments)
+            projection["callers"] = reconstructed_preflop["callers"]
+            projection["reconciliation_notes"] = list(notes)
+            projection["postflop_closing_call_repair_applied"] = True
+            projection_skipped = [str(pos) for pos in list(projection.get("positions_closed_to_action") or [])]
+            projection["positions_closed_to_action"] = [pos for pos in projection_skipped if pos not in {str(action.get("position")) for action in added_calls}]
+            projection_hero = projection.get("hero_context_preview")
+            if isinstance(projection_hero, dict):
+                projection_hero["callers"] = reconstructed_preflop["callers"]
+                projection_hero["postflop_closing_call_repair_applied"] = True
+
+        incoming_state["reconstructed_preflop"] = reconstructed_preflop
+        if isinstance(projection, dict):
+            incoming_state["preflop_projection"] = dict(projection)
+
+    def _carry_forward_preflop_state(self, incoming_state: dict, existing_state: dict, analysis: Optional[FrameAnalysis] = None) -> None:
+        """Keep the canonical preflop ledger alive across postflop frames.
+
+        Postflop action inference legitimately stores current-street commitments
+        such as a river bet in ``final_contribution_bb_by_pos``.  Those fields
+        must never be used as a replacement for the resolved preflop ledger.
+        When the hand advances flop/turn/river, carry the already-resolved
+        preflop payload forward inside action_state so render/solver layers read
+        the immutable preflop ledger instead of falling back to postflop money.
+        """
+        if not isinstance(incoming_state, dict) or not isinstance(existing_state, dict):
+            return
+
+        incoming_street = str(incoming_state.get("street") or "").lower()
+        if incoming_street == "preflop":
+            return
+
+        reconstructed = incoming_state.get("reconstructed_preflop")
+        if not isinstance(reconstructed, dict) or not reconstructed:
+            previous_reconstructed = existing_state.get("reconstructed_preflop")
+            if isinstance(previous_reconstructed, dict) and previous_reconstructed:
+                incoming_state["reconstructed_preflop"] = dict(previous_reconstructed)
+            elif str(existing_state.get("street") or "").lower() == "preflop":
+                # Legacy fallback: older preflop states can themselves be the
+                # resolved preflop payload. Only allow this when the previous
+                # state explicitly belongs to preflop; never synthesize it from
+                # a flop/turn/river amount state.
+                incoming_state["reconstructed_preflop"] = {
+                    key: value
+                    for key, value in dict(existing_state).items()
+                    if key
+                    in {
+                        "street",
+                        "source_mode",
+                        "hero_position",
+                        "node_type",
+                        "node_type_preview",
+                        "projection_node_type",
+                        "advisor_node_type",
+                        "advisor_mapping_reason",
+                        "opener_pos",
+                        "three_bettor_pos",
+                        "four_bettor_pos",
+                        "limpers",
+                        "limpers_count",
+                        "callers",
+                        "callers_after_open",
+                        "action_history",
+                        "action_history_resolved",
+                        "actor_order",
+                        "current_price_to_call",
+                        "last_aggressor_position",
+                        "final_contribution_bb_by_pos",
+                        "final_contribution_street_bb_by_pos",
+                        "hero_context_preview",
+                        "skipped_positions",
+                        "same_hand_identity",
+                        "contract_version",
+                    }
+                }
+
+        previous_projection = existing_state.get("preflop_projection")
+        if (not isinstance(incoming_state.get("preflop_projection"), dict) or not incoming_state.get("preflop_projection")) and isinstance(previous_projection, dict) and previous_projection:
+            incoming_state["preflop_projection"] = dict(previous_projection)
+
+        reconstructed = incoming_state.get("reconstructed_preflop")
+        if isinstance(reconstructed, dict) and reconstructed:
+            self._infer_missing_postflop_preflop_closing_calls(reconstructed, incoming_state, analysis)
+
     def _prepare_action_payloads_for_storage(self, hand: Optional[HandState], analysis: FrameAnalysis) -> tuple[list[dict], list[dict]]:
         incoming_state = dict(getattr(analysis, "action_inference", {}) or {})
         street = str(incoming_state.get("street") or getattr(analysis, "street", "preflop") or "preflop").lower()
@@ -126,6 +412,7 @@ class HandStateManager:
         existing_actions = []
         existing_history = []
         existing_resolved = []
+        existing_state = {}
         if hand is not None:
             existing_actions = [dict(item) for item in list(getattr(hand, "actions_log", []) or [])]
             existing_state = dict(getattr(hand, "action_state", {}) or {})
@@ -172,6 +459,7 @@ class HandStateManager:
         merged_history = self._dedupe_actions([*existing_history, *incoming_history, *novel_actions])
         analysis.action_inference["actions_this_frame"] = [dict(item) for item in novel_actions]
         analysis.action_inference["action_history"] = [dict(item) for item in merged_history]
+        self._carry_forward_preflop_state(analysis.action_inference, existing_state, analysis)
         return novel_actions, merged_history
 
     def create_hand(self, analysis: FrameAnalysis) -> HandState:
@@ -323,7 +611,26 @@ class HandStateManager:
         if str(analysis.street or "").lower() == "preflop":
             hand.actions_log = self._replace_street_actions(hand.actions_log, "preflop", merged_history)
         else:
-            hand.actions_log = self._dedupe_actions([*list(hand.actions_log), *list(novel_actions)])
+            # Postflop frames can repair the canonical preflop ledger after it is
+            # proven that a player reached postflop.  Keep actions_log in sync
+            # with that canonical ledger, otherwise UI/action_annotations may show
+            # only the old OPEN while reconstructed_preflop correctly has
+            # OPEN -> CALL.
+            reconstructed_preflop = analysis.action_inference.get("reconstructed_preflop")
+            if isinstance(reconstructed_preflop, dict) and reconstructed_preflop:
+                canonical_preflop_history = list(
+                    reconstructed_preflop.get("action_history_resolved")
+                    or reconstructed_preflop.get("action_history")
+                    or []
+                )
+            else:
+                canonical_preflop_history = []
+
+            if canonical_preflop_history:
+                synced_actions = self._replace_street_actions(hand.actions_log, "preflop", canonical_preflop_history)
+            else:
+                synced_actions = list(hand.actions_log)
+            hand.actions_log = self._dedupe_actions([*synced_actions, *list(novel_actions)])
         hand.board_cards = list(analysis.board_cards) if analysis.board_cards else hand.board_cards
         hand.player_states = {position: dict(payload) for position, payload in analysis.player_states.items()}
         if analysis.street != hand.street_state.get("current_street"):

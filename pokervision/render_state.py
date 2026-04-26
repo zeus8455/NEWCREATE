@@ -37,6 +37,36 @@ def _clear_legacy_solver_annotation(action_annotations: dict) -> dict:
     return cleaned
 
 
+def _select_reconstructed_preflop(hand: HandState) -> dict:
+    """Return the canonical preflop ledger for render/export.
+
+    Postflop frames have their own amount_state, so deriving preflop from the
+    current postflop action_state can leak river/turn/flop bets into
+    reconstructed_preflop. Prefer the preserved canonical ledger stored inside
+    action_state by HandStateManager; fall back to the hand-level snapshot only
+    when the canonical copy is absent.
+    """
+    action_state = hand.action_state if isinstance(hand.action_state, dict) else {}
+
+    canonical = action_state.get("reconstructed_preflop")
+    if isinstance(canonical, dict) and canonical:
+        return dict(canonical)
+
+    stored = getattr(hand, "reconstructed_preflop", None)
+    if isinstance(stored, dict) and stored:
+        return dict(stored)
+
+    # Only derive from action_state on an actual preflop frame. On postflop
+    # frames this would use postflop contribution maps and pollute the preflop
+    # ledger with current-street bets.
+    action_street = str(action_state.get("street") or "").lower()
+    current_street = str((hand.street_state or {}).get("current_street") or "").lower()
+    if action_street == "preflop" or current_street == "preflop":
+        return derive_reconstructed_preflop(action_state, hero_position=hand.hero_position)
+
+    return {}
+
+
 def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: str) -> RenderState:
     players: dict[str, dict] = {}
     action_state = hand.action_state or {}
@@ -84,10 +114,7 @@ def build_render_state(hand: HandState, source_frame_id: str, source_timestamp: 
     if hand.conflict_state:
         warnings.append(str(hand.conflict_state))
 
-    reconstructed_preflop = hand.reconstructed_preflop or derive_reconstructed_preflop(
-        hand.action_state,
-        hero_position=hand.hero_position,
-    )
+    reconstructed_preflop = _select_reconstructed_preflop(hand)
     reconstructed_postflop = hand.reconstructed_postflop or derive_reconstructed_postflop(
         street=street,
         action_state=hand.action_state,

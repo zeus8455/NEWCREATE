@@ -108,6 +108,28 @@ def _resolve_preflop_display_nodes(
     return projection_node_type, advisor_node_type, advisor_mapping_reason
 
 
+def select_reconstructed_preflop(
+    action_state: Optional[Dict[str, Any]],
+    stored_preflop: Optional[Dict[str, Any]] = None,
+    *,
+    hero_position: Optional[str],
+) -> Dict[str, Any]:
+    """Return the canonical preflop ledger for display / serialization.
+
+    During flop/turn/river frames the live action_state is postflop, but it
+    carries the canonical preflop ledger under action_state["reconstructed_preflop"].
+    Prefer that canonical copy over stale top-level HandState.reconstructed_preflop
+    so postflop bets cannot leak into the preflop ledger.
+    """
+    action_state = action_state or {}
+    canonical = action_state.get("reconstructed_preflop")
+    if isinstance(canonical, dict) and canonical:
+        return deepcopy(canonical)
+    if isinstance(stored_preflop, dict) and stored_preflop:
+        return deepcopy(stored_preflop)
+    return derive_reconstructed_preflop(action_state, hero_position=hero_position)
+
+
 def derive_reconstructed_preflop(
     action_state: Optional[Dict[str, Any]],
     *,
@@ -743,8 +765,9 @@ class FrameAnalysis:
             "amount_normalization": deepcopy(self.amount_normalization),
             "amount_state": derive_amount_state(self.table_amount_state, self.amount_normalization),
             "action_inference": deepcopy(self.action_inference),
-            "reconstructed_preflop": deepcopy(self.reconstructed_preflop) or derive_reconstructed_preflop(
+            "reconstructed_preflop": select_reconstructed_preflop(
                 self.action_inference,
+                self.reconstructed_preflop,
                 hero_position=self.hero_position,
             ),
             "reconstructed_postflop": deepcopy(self.reconstructed_postflop) or derive_reconstructed_postflop(
@@ -828,8 +851,9 @@ class HandState:
 
     def to_dict(self) -> Dict[str, Any]:
         street = str(self.street_state.get("current_street") or "preflop")
-        reconstructed_preflop = deepcopy(self.reconstructed_preflop) or derive_reconstructed_preflop(
+        reconstructed_preflop = select_reconstructed_preflop(
             self.action_state,
+            self.reconstructed_preflop,
             hero_position=self.hero_position,
         )
         reconstructed_postflop = deepcopy(self.reconstructed_postflop) or derive_reconstructed_postflop(
